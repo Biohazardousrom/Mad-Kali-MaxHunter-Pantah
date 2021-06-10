@@ -2044,6 +2044,8 @@ source "drivers/cpufreq/Kconfig"
 
 endmenu
 
+source "3party/Kconfig"
+
 source "drivers/firmware/Kconfig"
 
 source "drivers/acpi/Kconfig"
