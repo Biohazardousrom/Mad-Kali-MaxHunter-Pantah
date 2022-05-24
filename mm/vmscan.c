@@ -4626,6 +4626,7 @@ static void lru_gen_age_node(struct pglist_data *pgdat, struct scan_control *sc)
 	 * either too small or below min.
 	 */
 	if (mutex_trylock(&oom_lock)) {
+		pr_err("mglru: min_ttl unsatisfied, calling OOM killer\n");
 		struct oom_control oc = {
 			.gfp_mask = sc->gfp_mask,
 		};
