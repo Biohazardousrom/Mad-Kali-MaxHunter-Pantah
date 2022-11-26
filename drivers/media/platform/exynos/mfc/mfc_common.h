@@ -192,6 +192,9 @@
 
 #define HDR10_PLUS_ADDR(base, idx)	((base) + ((idx) * HDR10_PLUS_DATA_SIZE))
 
+#define MFC_UHD_RES		(3840 * 2160)
+#define IS_UHD_RES(ctx)		(((ctx)->crop_width * (ctx)->crop_height) == MFC_UHD_RES)
+
 /*
  levels with maximum property values
  level	Maximum frame size in MB (MB width x MB height)
