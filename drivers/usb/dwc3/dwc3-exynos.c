@@ -1071,7 +1071,6 @@ static struct attribute *dwc3_exynos_otg_attrs[] = {
 	&dev_attr_dwc3_exynos_extra_delay.attr,
 	&dev_attr_usb_data_enabled.attr,
 	&dev_attr_force_speed.attr,
-	&dev_attr_dwc3_exynos_gadget_state.attr,
 	NULL
 };
 ATTRIBUTE_GROUPS(dwc3_exynos_otg);
@@ -1212,7 +1211,6 @@ static int dwc3_exynos_probe(struct platform_device *pdev)
 
 	/* disconnect gadget in probe */
 	usb_udc_vbus_handler(exynos->dwc->gadget, false);
-
 	/*
 	 * To avoid missing notification in kernel booting check extcon
 	 * state to run state machine.

@@ -433,7 +433,7 @@ static int s2mpu_probe(struct platform_device *pdev)
 	 */
 	s2mpu_probe_irq(pdev, data);
 
-	/* If a device have a dma-cons property link it as a consumer. */
+        	/* If a device have a dma-cons property link it as a consumer. */
 	WARN_ON(pkvm_s2mpu_of_link_with_cons(dev));
 
 	ret = pkvm_iommu_s2mpu_register(dev, res->start);
@@ -480,18 +480,17 @@ static int s2mpu_probe(struct platform_device *pdev)
 
 	if (has_pd || data->always_on)
 		pm_runtime_enable(dev);
-
+	
 	/*
 	 * We get a reference for nodes with dma-cons as if we enabled run time pm for them, it will
 	 * cause faults and it is not safe yet to suspend them.
 	 * when the DMA device is probed it should properly configure the device and sync_state()
 	 * would put the device reference.
 	 */
-	if (data->always_on || (has_pd && dma_at_boot)) {
-		pm_runtime_get_sync(dev);
-		data->pm_ref = true;
+	if (data->always_on || (has_pd && dma_at_boot)) {    
+	        pm_runtime_get_sync(dev);
+               data->pm_ref = true;
 	}
-
 	return 0;
 }
 
