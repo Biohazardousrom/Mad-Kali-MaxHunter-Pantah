@@ -820,6 +820,19 @@
   drm_writeback_signal_completion
   dump_backtrace
   dump_stack
+  dvb_ca_en50221_init
+  dvb_ca_en50221_release
+  dvb_dmx_init
+  dvb_dmx_release
+  dvb_dmx_swfilter
+  dvb_dmxdev_init
+  dvb_dmxdev_release
+  dvb_frontend_detach
+  dvb_frontend_sleep_until
+  dvb_register_adapter
+  dvb_register_frontend
+  dvb_unregister_adapter
+  dvb_unregister_frontend
   dwc3_send_gadget_ep_cmd
   dwc3_stop_active_transfer
   dw_handle_msi_irq
@@ -1018,6 +1031,7 @@
   i2c_adapter_type
   i2c_add_numbered_adapter
   i2c_bus_type
+  i2c_clients_command
   i2c_del_adapter
   i2c_del_driver
   i2c_for_each_dev
@@ -1092,6 +1106,8 @@
   interval_tree_iter_first
   interval_tree_iter_next
   interval_tree_remove
+  intlog10
+  intlog2
   int_sqrt
   int_to_scsilun
   iomem_resource
@@ -1289,6 +1305,7 @@
   mbox_free_channel
   mbox_request_channel
   mbox_send_message
+  media_device_register_entity
   memchr
   memcmp
   memcpy
@@ -1499,6 +1516,7 @@
   param_ops_charp
   param_ops_int
   param_ops_long
+  param_ops_short
   param_ops_string
   param_ops_uint
   param_ops_ulong
@@ -1763,6 +1781,7 @@
   regmap_bulk_read
   regmap_bulk_write
   regmap_get_device
+  __regmap_init_i2c
   regmap_irq_get_virq
   regmap_multi_reg_write
   regmap_multi_reg_write_bypassed
@@ -2126,6 +2145,8 @@
   suspend_set_ops
   __sw_hweight32
   __sw_hweight64
+  __symbol_get
+  __symbol_put
   sync_file_create
   sync_file_get_fence
   synchronize_irq
@@ -2596,6 +2617,7 @@
   __usecs_to_jiffies
   usleep_range
   uuid_gen
+  v4l2_ctrl_auto_cluster
   v4l2_ctrl_handler_free
   v4l2_ctrl_handler_init_class
   v4l2_ctrl_log_status
