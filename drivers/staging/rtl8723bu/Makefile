@@ -25,6 +25,8 @@ ccflags-y += -D__CHECK_ENDIAN__
 
 #EXTRA_CFLAGS += -Wno-uninitialized
 
+subdir-ccflags-y := -I$(srctree)/$(src)/../include
+
 EXTRA_CFLAGS += -g -I$(src)/include
 
 #EXTRA_LDFLAGS += --strip-debug
