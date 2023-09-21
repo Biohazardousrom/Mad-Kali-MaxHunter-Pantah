@@ -30,6 +30,8 @@
   android_debug_symbol
   android_rvh_probe_register
   anon_inode_getfd
+  arc4_crypt
+  arc4_setkey
   __arch_clear_user
   __arch_copy_from_user
   __arch_copy_in_user
@@ -130,6 +132,7 @@
   bpf_trace_run7
   bpf_trace_run8
   bpf_trace_run9
+  bridge_tunnel_header
   build_skb
   bus_find_device
   bus_for_each_dev
@@ -884,6 +887,7 @@
   firmware_request_nowarn
   flush_dcache_page
   flush_delayed_work
+  flush_signals
   flush_work
   flush_workqueue
   force_fast_charge
@@ -1186,6 +1190,8 @@
   irq_work_queue
   irq_work_sync
   is_vmalloc_addr
+  iwe_stream_add_event
+  iwe_stream_add_point
   jiffies64_to_msecs
   jiffies
   jiffies_to_msecs
@@ -1200,6 +1206,7 @@
   kernel_recvmsg
   kernel_restart
   kernel_sendmsg
+  kernel_sigaction
   kern_mount
   kern_unmount
   __kfifo_alloc
@@ -2624,6 +2631,7 @@
   usb_put_hcd
   usb_register_notify
   usb_remove_hcd
+  usb_reset_device
   usb_role_switch_get_drvdata
   usb_role_switch_register
   usb_role_switch_unregister
@@ -2795,3 +2803,4 @@
   xhci_suspend
   xhci_update_erst_dequeue
   xhci_vendor_get_ops
+  yield
