@@ -13,7 +13,6 @@
 #include <linux/blkdev.h>
 #include <linux/keyslot-manager.h>
 #include <linux/module.h>
-#include <linux/ratelimit.h>
 #include <linux/slab.h>
 
 #include "blk-crypto-internal.h"
@@ -218,26 +217,26 @@ static bool bio_crypt_check_alignment(struct bio *bio)
 	return true;
 }
 
-blk_status_t __blk_crypto_rq_get_keyslot(struct request *rq)
+blk_status_t __blk_crypto_init_request(struct request *rq)
 {
 	return blk_ksm_get_slot_for_key(rq->q->ksm, rq->crypt_ctx->bc_key,
 					&rq->crypt_keyslot);
 }
 
-void __blk_crypto_rq_put_keyslot(struct request *rq)
-{
-	blk_ksm_put_slot(rq->crypt_keyslot);
-	rq->crypt_keyslot = NULL;
-}
-
+/**
+ * __blk_crypto_free_request - Uninitialize the crypto fields of a request.
+ *
+ * @rq: The request whose crypto fields to uninitialize.
+ *
+ * Completely uninitializes the crypto fields of a request. If a keyslot has
+ * been programmed into some inline encryption hardware, that keyslot is
+ * released. The rq->crypt_ctx is also freed.
+ */
 void __blk_crypto_free_request(struct request *rq)
 {
-	/* The keyslot, if one was needed, should have been released earlier. */
-	if (WARN_ON_ONCE(rq->crypt_keyslot))
-		__blk_crypto_rq_put_keyslot(rq);
-
+	blk_ksm_put_slot(rq->crypt_keyslot);
 	mempool_free(rq->crypt_ctx, bio_crypt_ctx_pool);
-	rq->crypt_ctx = NULL;
+	blk_crypto_rq_set_defaults(rq);
 }
 
 /**
@@ -410,39 +409,29 @@ int blk_crypto_start_using_key(const struct blk_crypto_key *key,
 EXPORT_SYMBOL_GPL(blk_crypto_start_using_key);
 
 /**
- * blk_crypto_evict_key() - Evict a blk_crypto_key from a request_queue
- * @q: a request_queue on which I/O using the key may have been done
- * @key: the key to evict
+ * blk_crypto_evict_key() - Evict a key from any inline encryption hardware
+ *			    it may have been programmed into
+ * @q: The request queue who's associated inline encryption hardware this key
+ *     might have been programmed into
+ * @key: The key to evict
  *
- * For a given request_queue, this function removes the given blk_crypto_key
- * from the keyslot management structures and evicts it from any underlying
- * hardware keyslot(s) or blk-crypto-fallback keyslot it may have been
- * programmed into.
+ * Upper layers (filesystems) must call this function to ensure that a key is
+ * evicted from any hardware that it might have been programmed into.  The key
+ * must not be in use by any in-flight IO when this function is called.
  *
- * Upper layers must call this before freeing the blk_crypto_key.  It must be
- * called for every request_queue the key may have been used on.  The key must
- * no longer be in use by any I/O when this function is called.
- *
- * Context: May sleep.
+ * Return: 0 on success or if key is not present in the q's ksm, -err on error.
  */
-void blk_crypto_evict_key(struct request_queue *q,
-			  const struct blk_crypto_key *key)
+int blk_crypto_evict_key(struct request_queue *q,
+			 const struct blk_crypto_key *key)
 {
-	int err;
-
 	if (blk_ksm_crypto_cfg_supported(q->ksm, &key->crypto_cfg))
-		err = blk_ksm_evict_key(q->ksm, key);
-	else
-		err = blk_crypto_fallback_evict_key(key);
+		return blk_ksm_evict_key(q->ksm, key);
+
 	/*
-	 * An error can only occur here if the key failed to be evicted from a
-	 * keyslot (due to a hardware or driver issue) or is allegedly still in
-	 * use by I/O (due to a kernel bug).  Even in these cases, the key is
-	 * still unlinked from the keyslot management structures, and the caller
-	 * is allowed and expected to free it right away.  There's nothing
-	 * callers can do to handle errors, so just log them and return void.
+	 * If the request queue's associated inline encryption hardware didn't
+	 * have support for the key, then the key might have been programmed
+	 * into the fallback keyslot manager, so try to evict from there.
 	 */
-	if (err)
-		pr_warn_ratelimited("error %d evicting key\n", err);
+	return blk_crypto_fallback_evict_key(key);
 }
 EXPORT_SYMBOL_GPL(blk_crypto_evict_key);

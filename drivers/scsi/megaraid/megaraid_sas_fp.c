@@ -358,7 +358,7 @@ u8 MR_ValidateMapInfo(struct megasas_instance *instance, u64 map_id)
 		ld = MR_TargetIdToLdGet(i, drv_map);
 
 		/* For non existing VDs, iterate to next VD*/
-		if (ld >= MEGASAS_MAX_SUPPORTED_LD_IDS)
+		if (ld >= (MAX_LOGICAL_DRIVES_EXT - 1))
 			continue;
 
 		raid = MR_LdRaidGet(ld, drv_map);

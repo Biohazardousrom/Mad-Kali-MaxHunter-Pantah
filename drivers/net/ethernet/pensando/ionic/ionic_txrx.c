@@ -986,7 +986,7 @@ static int ionic_tx_calc_csum(struct ionic_queue *q, struct sk_buff *skb)
 		stats->vlan_inserted++;
 	}
 
-	if (skb_csum_is_sctp(skb))
+	if (skb->csum_not_inet)
 		stats->crc32_csum++;
 	else
 		stats->csum++;

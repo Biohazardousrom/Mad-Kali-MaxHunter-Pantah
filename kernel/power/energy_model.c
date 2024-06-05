@@ -85,7 +85,10 @@ static void em_debug_create_pd(struct device *dev)
 
 static void em_debug_remove_pd(struct device *dev)
 {
-	debugfs_lookup_and_remove(dev_name(dev), rootdir);
+	struct dentry *debug_dir;
+
+	debug_dir = debugfs_lookup(dev_name(dev), rootdir);
+	debugfs_remove_recursive(debug_dir);
 }
 
 static int __init em_debug_init(void)

@@ -472,9 +472,10 @@ static int synquacer_spi_transfer_one(struct spi_master *master,
 		read_fifo(sspi);
 	}
 
-	if (status == 0) {
-		dev_err(sspi->dev, "failed to transfer. Timeout.\n");
-		return -ETIMEDOUT;
+	if (status < 0) {
+		dev_err(sspi->dev, "failed to transfer. status: 0x%x\n",
+			status);
+		return status;
 	}
 
 	return 0;

@@ -79,6 +79,6 @@ void *decompress_kernel(void)
 	void *output = (void *)decompress_offset;
 
 	__decompress(_compressed_start, _compressed_end - _compressed_start,
-		     NULL, NULL, output, vmlinux.image_size, NULL, error);
+		     NULL, NULL, output, 0, NULL, error);
 	return output;
 }

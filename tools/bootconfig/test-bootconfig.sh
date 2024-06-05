@@ -87,14 +87,10 @@ xfail grep -i "error" $OUTFILE
 
 echo "Max node number check"
 
-awk '
-BEGIN {
-  for (i = 0; i < 26; i += 1)
-      printf("%c\n", 65 + i % 26)
-  for (i = 26; i < 8192; i += 1)
-      printf("%c%c%c\n", 65 + i % 26, 65 + (i / 26) % 26, 65 + (i / 26 / 26))
-}
-' > $TEMPCONF
+echo -n > $TEMPCONF
+for i in `seq 1 1024` ; do
+   echo "node$i" >> $TEMPCONF
+done
 xpass $BOOTCONF -a $TEMPCONF $INITRD
 
 echo "badnode" >> $TEMPCONF

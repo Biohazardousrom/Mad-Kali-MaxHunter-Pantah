@@ -69,7 +69,6 @@
   device_unregister
   _dev_info
   __dev_kfree_skb_any
-  __dev_kfree_skb_irq
   devm_ioremap
   devm_ioremap_resource
   devm_kfree

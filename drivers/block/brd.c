@@ -80,9 +80,11 @@ static struct page *brd_lookup_page(struct brd_device *brd, sector_t sector)
 }
 
 /*
- * Insert a new page for a given sector, if one does not already exist.
+ * Look up and return a brd's page for a given sector.
+ * If one does not exist, allocate an empty page, and insert that. Then
+ * return it.
  */
-static int brd_insert_page(struct brd_device *brd, sector_t sector)
+static struct page *brd_insert_page(struct brd_device *brd, sector_t sector)
 {
 	pgoff_t idx;
 	struct page *page;
@@ -90,7 +92,7 @@ static int brd_insert_page(struct brd_device *brd, sector_t sector)
 
 	page = brd_lookup_page(brd, sector);
 	if (page)
-		return 0;
+		return page;
 
 	/*
 	 * Must use NOIO because we don't want to recurse back into the
@@ -99,11 +101,11 @@ static int brd_insert_page(struct brd_device *brd, sector_t sector)
 	gfp_flags = GFP_NOIO | __GFP_ZERO | __GFP_HIGHMEM;
 	page = alloc_page(gfp_flags);
 	if (!page)
-		return -ENOMEM;
+		return NULL;
 
 	if (radix_tree_preload(GFP_NOIO)) {
 		__free_page(page);
-		return -ENOMEM;
+		return NULL;
 	}
 
 	spin_lock(&brd->brd_lock);
@@ -118,7 +120,8 @@ static int brd_insert_page(struct brd_device *brd, sector_t sector)
 	spin_unlock(&brd->brd_lock);
 
 	radix_tree_preload_end();
-	return 0;
+
+	return page;
 }
 
 /*
@@ -171,17 +174,16 @@ static int copy_to_brd_setup(struct brd_device *brd, sector_t sector, size_t n)
 {
 	unsigned int offset = (sector & (PAGE_SECTORS-1)) << SECTOR_SHIFT;
 	size_t copy;
-	int ret;
 
 	copy = min_t(size_t, n, PAGE_SIZE - offset);
-	ret = brd_insert_page(brd, sector);
-	if (ret)
-		return ret;
+	if (!brd_insert_page(brd, sector))
+		return -ENOSPC;
 	if (copy < n) {
 		sector += copy >> SECTOR_SHIFT;
-		ret = brd_insert_page(brd, sector);
+		if (!brd_insert_page(brd, sector))
+			return -ENOSPC;
 	}
-	return ret;
+	return 0;
 }
 
 /*

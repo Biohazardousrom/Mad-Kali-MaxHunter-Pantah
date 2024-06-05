@@ -24,6 +24,7 @@
 		}								\
 		if (!--retry)							\
 			break;							\
+		cpu_relax();							\
 	}									\
 } while (0)
 

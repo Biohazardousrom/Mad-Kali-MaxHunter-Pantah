@@ -601,7 +601,7 @@ static int ptp_qoriq_probe(struct platform_device *dev)
 	return 0;
 
 no_clock:
-	iounmap(base);
+	iounmap(ptp_qoriq->base);
 no_ioremap:
 	release_resource(ptp_qoriq->rsrc);
 no_resource:

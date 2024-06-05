@@ -83,10 +83,7 @@ static struct qrtr_node *node_get(unsigned int node_id)
 
 	node->id = node_id;
 
-	if (radix_tree_insert(&nodes, node_id, node)) {
-		kfree(node);
-		return NULL;
-	}
+	radix_tree_insert(&nodes, node_id, node);
 
 	return node;
 }

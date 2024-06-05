@@ -413,7 +413,7 @@ void __noreturn die(const char *str, struct pt_regs *regs)
 	if (regs && kexec_should_crash(current))
 		crash_kexec(regs);
 
-	make_task_dead(sig);
+	do_exit(sig);
 }
 
 extern struct exception_table_entry __start___dbe_table[];

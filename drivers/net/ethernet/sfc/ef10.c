@@ -1304,8 +1304,7 @@ static void efx_ef10_fini_nic(struct efx_nic *efx)
 static int efx_ef10_init_nic(struct efx_nic *efx)
 {
 	struct efx_ef10_nic_data *nic_data = efx->nic_data;
-	struct net_device *net_dev = efx->net_dev;
-	netdev_features_t tun_feats, tso_feats;
+	netdev_features_t hw_enc_features = 0;
 	int rc;
 
 	if (nic_data->must_check_datapath_caps) {
@@ -1350,30 +1349,20 @@ static int efx_ef10_init_nic(struct efx_nic *efx)
 		nic_data->must_restore_piobufs = false;
 	}
 
-	/* encap features might change during reset if fw variant changed */
+	/* add encapsulated checksum offload features */
 	if (efx_has_cap(efx, VXLAN_NVGRE) && !efx_ef10_is_vf(efx))
-		net_dev->hw_enc_features |= NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM;
-	else
-		net_dev->hw_enc_features &= ~(NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM);
-
-	tun_feats = NETIF_F_GSO_UDP_TUNNEL | NETIF_F_GSO_GRE |
-		    NETIF_F_GSO_UDP_TUNNEL_CSUM | NETIF_F_GSO_GRE_CSUM;
-	tso_feats = NETIF_F_TSO | NETIF_F_TSO6;
-
+		hw_enc_features |= NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM;
+	/* add encapsulated TSO features */
 	if (efx_has_cap(efx, TX_TSO_V2_ENCAP)) {
-		/* If this is first nic_init, or if it is a reset and a new fw
-		 * variant has added new features, enable them by default.
-		 * If the features are not new, maintain their current value.
-		 */
-		if (!(net_dev->hw_features & tun_feats))
-			net_dev->features |= tun_feats;
-		net_dev->hw_enc_features |= tun_feats | tso_feats;
-		net_dev->hw_features |= tun_feats;
-	} else {
-		net_dev->hw_enc_features &= ~(tun_feats | tso_feats);
-		net_dev->hw_features &= ~tun_feats;
-		net_dev->features &= ~tun_feats;
+		netdev_features_t encap_tso_features;
+
+		encap_tso_features = NETIF_F_GSO_UDP_TUNNEL | NETIF_F_GSO_GRE |
+			NETIF_F_GSO_UDP_TUNNEL_CSUM | NETIF_F_GSO_GRE_CSUM;
+
+		hw_enc_features |= encap_tso_features | NETIF_F_TSO;
+		efx->net_dev->features |= encap_tso_features;
 	}
+	efx->net_dev->hw_enc_features = hw_enc_features;
 
 	/* don't fail init if RSS setup doesn't work */
 	rc = efx->type->rx_push_rss_config(efx, false,
@@ -3988,10 +3977,7 @@ static unsigned int ef10_check_caps(const struct efx_nic *efx,
 	 NETIF_F_HW_VLAN_CTAG_FILTER |	\
 	 NETIF_F_IPV6_CSUM |		\
 	 NETIF_F_RXHASH |		\
-	 NETIF_F_NTUPLE |		\
-	 NETIF_F_SG |			\
-	 NETIF_F_RXCSUM |		\
-	 NETIF_F_RXALL)
+	 NETIF_F_NTUPLE)
 
 const struct efx_nic_type efx_hunt_a0_vf_nic_type = {
 	.is_vf = true,

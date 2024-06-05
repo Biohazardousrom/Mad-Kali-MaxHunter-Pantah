@@ -2052,7 +2052,6 @@ struct mfc_dec {
 	unsigned long dynamic_set;
 	unsigned long dynamic_used;
 
-	int is_multiframe;
 	int has_multiframe;
 	int is_multiple_show;
 
