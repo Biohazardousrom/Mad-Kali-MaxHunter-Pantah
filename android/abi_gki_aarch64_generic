@@ -1532,6 +1532,7 @@
   param_ops_charp
   param_ops_int
   param_ops_long
+  param_ops_short
   param_ops_string
   param_ops_uint
   param_ops_ulong
@@ -2652,6 +2653,7 @@
   __usecs_to_jiffies
   usleep_range
   uuid_gen
+  v4l2_ctrl_auto_cluster
   v4l2_ctrl_handler_free
   v4l2_ctrl_handler_init_class
   v4l2_ctrl_log_status
