@@ -146,15 +146,13 @@ void ubi_refill_pools(struct ubi_device *ubi)
 	if (ubi->fm_anchor) {
 		wl_tree_add(ubi->fm_anchor, &ubi->free);
 		ubi->free_count++;
-		ubi->fm_anchor = NULL;
 	}
 
-	if (!ubi->fm_disabled)
-		/*
-		 * All available PEBs are in ubi->free, now is the time to get
-		 * the best anchor PEBs.
-		 */
-		ubi->fm_anchor = ubi_wl_get_fm_peb(ubi, 1);
+	/*
+	 * All available PEBs are in ubi->free, now is the time to get
+	 * the best anchor PEBs.
+	 */
+	ubi->fm_anchor = ubi_wl_get_fm_peb(ubi, 1);
 
 	for (;;) {
 		enough = 0;

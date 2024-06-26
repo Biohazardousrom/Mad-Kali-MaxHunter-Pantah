@@ -56,7 +56,6 @@ static struct page_pinner_buffer pp_buffer;
 
 static bool page_pinner_enabled;
 DEFINE_STATIC_KEY_FALSE(page_pinner_inited);
-EXPORT_SYMBOL(page_pinner_inited);
 
 DEFINE_STATIC_KEY_TRUE(failure_tracking);
 EXPORT_SYMBOL_GPL(failure_tracking);

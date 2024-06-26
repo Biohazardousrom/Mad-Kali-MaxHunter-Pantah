@@ -252,11 +252,7 @@ static unsigned long dbg_snapshot_suspend(const char *log, struct device *dev,
 		(ARRAY_SIZE(dss_log->suspend) - 1);
 
 	dss_log->suspend[i].time = local_clock();
-	if (log && dev && dev->driver && dev->driver->name && strlen(dev->driver->name)) {
-		dss_log->suspend[i].log = dev->driver->name;
-	} else {
-		dss_log->suspend[i].log = log;
-	}
+	dss_log->suspend[i].log = log ? log : NULL;
 	dss_log->suspend[i].event = event;
 	dss_log->suspend[i].dev = dev ? dev_name(dev) : "";
 	dss_log->suspend[i].core = raw_smp_processor_id();
@@ -713,13 +709,6 @@ void dbg_snapshot_init_log(void)
 {
 	struct dbg_snapshot_item *item = &dss_items[DSS_ITEM_KEVENTS_ID];
 	struct dbg_snapshot_log_item *log_item;
-	int i;
-
-	if (!item->entry.enabled) {
-		for (i = 0; i < ARRAY_SIZE(dss_log_items); i++)
-			dss_log_items[i].entry.enabled = false;
-		return;
-	}
 
 	log_item_set_filed(TASK, task);
 	log_item_set_filed(WORK, work);

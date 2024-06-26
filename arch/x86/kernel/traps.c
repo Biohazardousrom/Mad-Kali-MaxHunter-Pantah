@@ -1185,7 +1185,9 @@ void __init trap_init(void)
 
 	idt_setup_traps();
 
-	cpu_init_exception_handling();
+	/*
+	 * Should be a barrier for any external CPU state:
+	 */
 	cpu_init();
 
 	idt_setup_ist_traps();

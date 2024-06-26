@@ -51,27 +51,24 @@ DECLARE_STATIC_KEY_FALSE(rdt_mon_enable_key);
  *   simple as possible.
  * Must be called with preemption disabled.
  */
-static inline void __resctrl_sched_in(struct task_struct *tsk)
+static void __resctrl_sched_in(void)
 {
 	struct resctrl_pqr_state *state = this_cpu_ptr(&pqr_state);
 	u32 closid = state->default_closid;
 	u32 rmid = state->default_rmid;
-	u32 tmp;
 
 	/*
 	 * If this task has a closid/rmid assigned, use it.
 	 * Else use the closid/rmid assigned to this cpu.
 	 */
 	if (static_branch_likely(&rdt_alloc_enable_key)) {
-		tmp = READ_ONCE(tsk->closid);
-		if (tmp)
-			closid = tmp;
+		if (current->closid)
+			closid = current->closid;
 	}
 
 	if (static_branch_likely(&rdt_mon_enable_key)) {
-		tmp = READ_ONCE(tsk->rmid);
-		if (tmp)
-			rmid = tmp;
+		if (current->rmid)
+			rmid = current->rmid;
 	}
 
 	if (closid != state->cur_closid || rmid != state->cur_rmid) {
@@ -81,17 +78,17 @@ static inline void __resctrl_sched_in(struct task_struct *tsk)
 	}
 }
 
-static inline void resctrl_sched_in(struct task_struct *tsk)
+static inline void resctrl_sched_in(void)
 {
 	if (static_branch_likely(&rdt_enable_key))
-		__resctrl_sched_in(tsk);
+		__resctrl_sched_in();
 }
 
 void resctrl_cpu_detect(struct cpuinfo_x86 *c);
 
 #else
 
-static inline void resctrl_sched_in(struct task_struct *tsk) {}
+static inline void resctrl_sched_in(void) {}
 static inline void resctrl_cpu_detect(struct cpuinfo_x86 *c) {}
 
 #endif /* CONFIG_X86_CPU_RESCTRL */

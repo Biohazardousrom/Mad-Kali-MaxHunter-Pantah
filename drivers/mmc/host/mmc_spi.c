@@ -1450,7 +1450,7 @@ static int mmc_spi_probe(struct spi_device *spi)
 
 	status = mmc_add_host(mmc);
 	if (status != 0)
-		goto fail_glue_init;
+		goto fail_add_host;
 
 	/*
 	 * Index 0 is card detect
@@ -1458,7 +1458,7 @@ static int mmc_spi_probe(struct spi_device *spi)
 	 */
 	status = mmc_gpiod_request_cd(mmc, NULL, 0, false, 1000);
 	if (status == -EPROBE_DEFER)
-		goto fail_gpiod_request;
+		goto fail_add_host;
 	if (!status) {
 		/*
 		 * The platform has a CD GPIO signal that may support
@@ -1473,7 +1473,7 @@ static int mmc_spi_probe(struct spi_device *spi)
 	/* Index 1 is write protect/read only */
 	status = mmc_gpiod_request_ro(mmc, NULL, 1, 0);
 	if (status == -EPROBE_DEFER)
-		goto fail_gpiod_request;
+		goto fail_add_host;
 	if (!status)
 		has_ro = true;
 
@@ -1487,7 +1487,7 @@ static int mmc_spi_probe(struct spi_device *spi)
 				? ", cd polling" : "");
 	return 0;
 
-fail_gpiod_request:
+fail_add_host:
 	mmc_remove_host(mmc);
 fail_glue_init:
 	mmc_spi_dma_free(host);

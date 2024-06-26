@@ -96,7 +96,6 @@ struct vfio_dma {
 	struct task_struct	*task;
 	struct rb_root		pfn_list;	/* Ex-user pinned pfn list */
 	unsigned long		*bitmap;
-	struct mm_struct	*mm;
 };
 
 struct vfio_batch {
@@ -392,8 +391,8 @@ static int vfio_lock_acct(struct vfio_dma *dma, long npage, bool async)
 	if (!npage)
 		return 0;
 
-	mm = dma->mm;
-	if (async && !mmget_not_zero(mm))
+	mm = async ? get_task_mm(dma->task) : dma->task->mm;
+	if (!mm)
 		return -ESRCH; /* process exited */
 
 	ret = mmap_write_lock_killable(mm);
@@ -667,8 +666,8 @@ static int vfio_pin_page_external(struct vfio_dma *dma, unsigned long vaddr,
 	struct mm_struct *mm;
 	int ret;
 
-	mm = dma->mm;
-	if (!mmget_not_zero(mm))
+	mm = get_task_mm(dma->task);
+	if (!mm)
 		return -ENODEV;
 
 	ret = vaddr_get_pfns(mm, vaddr, 1, dma->prot, pfn_base, pages);
@@ -678,7 +677,7 @@ static int vfio_pin_page_external(struct vfio_dma *dma, unsigned long vaddr,
 	ret = 0;
 
 	if (do_accounting && !is_invalid_reserved_pfn(*pfn_base)) {
-		ret = vfio_lock_acct(dma, 1, false);
+		ret = vfio_lock_acct(dma, 1, true);
 		if (ret) {
 			put_pfn(*pfn_base, dma->prot);
 			if (ret == -ENOMEM)
@@ -1032,7 +1031,6 @@ static void vfio_remove_dma(struct vfio_iommu *iommu, struct vfio_dma *dma)
 	vfio_unmap_unpin(iommu, dma, true);
 	vfio_unlink_dma(iommu, dma);
 	put_task_struct(dma->task);
-	mmdrop(dma->mm);
 	vfio_dma_bitmap_free(dma);
 	kfree(dma);
 	iommu->dma_avail++;
@@ -1454,15 +1452,29 @@ static int vfio_dma_do_map(struct vfio_iommu *iommu,
 	 * against the locked memory limit and we need to be able to do both
 	 * outside of this call path as pinning can be asynchronous via the
 	 * external interfaces for mdev devices.  RLIMIT_MEMLOCK requires a
-	 * task_struct. Save the group_leader so that all DMA tracking uses
-	 * the same task, to make debugging easier.  VM locked pages requires
-	 * an mm_struct, so grab the mm in case the task dies.
+	 * task_struct and VM locked pages requires an mm_struct, however
+	 * holding an indefinite mm reference is not recommended, therefore we
+	 * only hold a reference to a task.  We could hold a reference to
+	 * current, however QEMU uses this call path through vCPU threads,
+	 * which can be killed resulting in a NULL mm and failure in the unmap
+	 * path when called via a different thread.  Avoid this problem by
+	 * using the group_leader as threads within the same group require
+	 * both CLONE_THREAD and CLONE_VM and will therefore use the same
+	 * mm_struct.
+	 *
+	 * Previously we also used the task for testing CAP_IPC_LOCK at the
+	 * time of pinning and accounting, however has_capability() makes use
+	 * of real_cred, a copy-on-write field, so we can't guarantee that it
+	 * matches group_leader, or in fact that it might not change by the
+	 * time it's evaluated.  If a process were to call MAP_DMA with
+	 * CAP_IPC_LOCK but later drop it, it doesn't make sense that they
+	 * possibly see different results for an iommu_mapped vfio_dma vs
+	 * externally mapped.  Therefore track CAP_IPC_LOCK in vfio_dma at the
+	 * time of calling MAP_DMA.
 	 */
 	get_task_struct(current->group_leader);
 	dma->task = current->group_leader;
 	dma->lock_cap = capable(CAP_IPC_LOCK);
-	dma->mm = current->mm;
-	mmgrab(dma->mm);
 
 	dma->pfn_list = RB_ROOT;
 
@@ -2986,8 +2998,9 @@ static int vfio_iommu_type1_dma_rw_chunk(struct vfio_iommu *iommu,
 			!(dma->prot & IOMMU_READ))
 		return -EPERM;
 
-	mm = dma->mm;
-	if (!mmget_not_zero(mm))
+	mm = get_task_mm(dma->task);
+
+	if (!mm)
 		return -EPERM;
 
 	if (kthread)

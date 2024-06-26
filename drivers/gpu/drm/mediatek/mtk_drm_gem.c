@@ -142,6 +142,8 @@ static int mtk_drm_gem_object_mmap(struct drm_gem_object *obj,
 
 	ret = dma_mmap_attrs(priv->dma_dev, vma, mtk_gem->cookie,
 			     mtk_gem->dma_addr, obj->size, mtk_gem->dma_attrs);
+	if (ret)
+		drm_gem_vm_close(vma);
 
 	return ret;
 }
@@ -264,6 +266,6 @@ void mtk_drm_gem_prime_vunmap(struct drm_gem_object *obj, void *vaddr)
 		return;
 
 	vunmap(vaddr);
-	mtk_gem->kvaddr = NULL;
+	mtk_gem->kvaddr = 0;
 	kfree(mtk_gem->pages);
 }

@@ -909,22 +909,22 @@ struct g2d_device_data {
 	unsigned short fmts_dst;
 };
 
-static const struct g2d_device_data g2d_9610_data = {
+const struct g2d_device_data g2d_9610_data __initconst = {
 	.max_layers = G2D_MAX_IMAGES_HALF,
 };
 
-static const struct g2d_device_data g2d_9810_data = {
+const struct g2d_device_data g2d_9810_data __initconst = {
 	.caps = G2D_DEVICE_CAPS_HDR10,
 	.max_layers = G2D_MAX_IMAGES,
 };
 
-static const struct g2d_device_data g2d_9820_data = {
+const struct g2d_device_data g2d_9820_data __initconst = {
 	.caps = G2D_DEVICE_CAPS_SELF_PROTECTION | G2D_DEVICE_CAPS_YUV_BITDEPTH |
 		G2D_DEVICE_CAPS_HWFC | G2D_DEVICE_CAPS_HDR10,
 	.max_layers = G2D_MAX_IMAGES,
 };
 
-static const struct g2d_device_data g2d_gs101_data = {
+const struct g2d_device_data g2d_gs101_data __initconst = {
 	.caps = G2D_DEVICE_CAPS_SELF_PROTECTION | G2D_DEVICE_CAPS_YUV_BITDEPTH |
 		G2D_DEVICE_CAPS_SBWC | G2D_DEVICE_CAPS_AFBC_V12 |
 		G2D_DEVICE_CAPS_POLYFILTER | G2D_DEVICE_CAPS_HDR10PLUS,
@@ -943,7 +943,7 @@ static const struct g2d_device_data g2d_gs101_data = {
 		    BIT(G2D_FMT_IDX_1010102),
 };
 
-static const struct g2d_device_data g2d_gs201_data = {
+const struct g2d_device_data g2d_gs201_data __initconst = {
 	.caps = G2D_DEVICE_CAPS_SELF_PROTECTION | G2D_DEVICE_CAPS_YUV_BITDEPTH |
 		G2D_DEVICE_CAPS_SBWC | G2D_DEVICE_CAPS_AFBC_V12 |
 		G2D_DEVICE_CAPS_POLYFILTER | G2D_DEVICE_CAPS_HDR10PLUS | G2D_DEVICE_CAPS_SBWC_LOSSY,

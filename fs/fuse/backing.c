@@ -348,19 +348,44 @@ void *fuse_create_open_finalize(
 }
 
 int fuse_release_initialize(struct fuse_bpf_args *fa, struct fuse_release_in *fri,
-			    struct inode *inode, struct fuse_file *ff)
+			    struct inode *inode, struct file *file)
 {
+	struct fuse_file *fuse_file = file->private_data;
+
 	/* Always put backing file whatever bpf/userspace says */
-	fput(ff->backing_file);
+	fput(fuse_file->backing_file);
 
 	*fri = (struct fuse_release_in) {
-		.fh = ff->fh,
+		.fh = ((struct fuse_file *)(file->private_data))->fh,
 	};
 
 	*fa = (struct fuse_bpf_args) {
 		.nodeid = get_fuse_inode(inode)->nodeid,
-		.opcode = S_ISDIR(inode->i_mode) ? FUSE_RELEASEDIR
-						 : FUSE_RELEASE,
+		.opcode = FUSE_RELEASE,
+		.in_numargs = 1,
+		.in_args[0].size = sizeof(*fri),
+		.in_args[0].value = fri,
+	};
+
+	return 0;
+}
+
+int fuse_releasedir_initialize(struct fuse_bpf_args *fa,
+			struct fuse_release_in *fri,
+			struct inode *inode, struct file *file)
+{
+	struct fuse_file *fuse_file = file->private_data;
+
+	/* Always put backing file whatever bpf/userspace says */
+	fput(fuse_file->backing_file);
+
+	*fri = (struct fuse_release_in) {
+		.fh = ((struct fuse_file *)(file->private_data))->fh,
+	};
+
+	*fa = (struct fuse_bpf_args) {
+		.nodeid = get_fuse_inode(inode)->nodeid,
+		.opcode = FUSE_RELEASEDIR,
 		.in_numargs = 1,
 		.in_args[0].size = sizeof(*fri),
 		.in_args[0].value = fri,
@@ -370,14 +395,15 @@ int fuse_release_initialize(struct fuse_bpf_args *fa, struct fuse_release_in *fr
 }
 
 int fuse_release_backing(struct fuse_bpf_args *fa,
-			 struct inode *inode, struct fuse_file *ff)
+			 struct inode *inode, struct file *file)
 {
 	return 0;
 }
 
 void *fuse_release_finalize(struct fuse_bpf_args *fa,
-			    struct inode *inode, struct fuse_file *ff)
+			    struct inode *inode, struct file *file)
 {
+	fuse_file_free(file->private_data);
 	return NULL;
 }
 
@@ -1014,20 +1040,6 @@ void *fuse_file_write_iter_finalize(struct fuse_bpf_args *fa,
 	struct fuse_write_iter_out *fwio = fa->out_args[0].value;
 
 	return ERR_PTR(fwio->ret);
-}
-
-int fuse_file_flock_backing(struct file *file, int cmd, struct file_lock *fl)
-{
-	struct fuse_file *ff = file->private_data;
-	struct file *backing_file = ff->backing_file;
-	int error;
-
-	fl->fl_file = backing_file;
-	if (backing_file->f_op->flock)
-		error = backing_file->f_op->flock(backing_file, cmd, fl);
-	else
-		error = locks_lock_file_wait(backing_file, fl);
-	return error;
 }
 
 ssize_t fuse_backing_mmap(struct file *file, struct vm_area_struct *vma)

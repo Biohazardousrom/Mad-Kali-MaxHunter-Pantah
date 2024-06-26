@@ -32,19 +32,13 @@ static void enter_vmid_context(struct kvm_s2_mmu *mmu,
 	 * to do.
 	 */
 	if (vcpu) {
-		/* We're in guest context */
 		if (mmu == vcpu->arch.hw_mmu || WARN_ON(mmu != host_mmu))
 			return;
-
-		cxt->mmu = vcpu->arch.hw_mmu;
-	} else {
-		/* We're in host context */
-		if (mmu == host_mmu)
-			return;
-
-		cxt->mmu = host_mmu;
+	} else if (mmu == host_mmu) {
+		return;
 	}
 
+	cxt->mmu = mmu;
 	if (cpus_have_final_cap(ARM64_WORKAROUND_SPECULATIVE_AT)) {
 		u64 val;
 

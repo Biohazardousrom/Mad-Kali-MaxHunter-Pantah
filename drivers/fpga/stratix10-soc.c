@@ -213,9 +213,9 @@ static int s10_ops_write_init(struct fpga_manager *mgr,
 	/* Allocate buffers from the service layer's pool. */
 	for (i = 0; i < NUM_SVC_BUFS; i++) {
 		kbuf = stratix10_svc_allocate_memory(priv->chan, SVC_BUF_SIZE);
-		if (IS_ERR(kbuf)) {
+		if (!kbuf) {
 			s10_free_buffers(mgr);
-			ret = PTR_ERR(kbuf);
+			ret = -ENOMEM;
 			goto init_done;
 		}
 

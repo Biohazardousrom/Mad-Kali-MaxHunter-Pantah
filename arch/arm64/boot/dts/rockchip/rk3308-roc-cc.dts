@@ -13,7 +13,7 @@
 		stdout-path = "serial2:1500000n8";
 	};
 
-	ir-receiver {
+	ir_rx {
 		compatible = "gpio-ir-receiver";
 		gpios = <&gpio0 RK_PC0 GPIO_ACTIVE_HIGH>;
 		pinctrl-names = "default";

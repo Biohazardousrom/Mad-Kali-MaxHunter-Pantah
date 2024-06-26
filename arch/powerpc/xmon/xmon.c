@@ -1383,6 +1383,7 @@ static long check_bp_loc(unsigned long addr)
 	return 1;
 }
 
+#ifndef CONFIG_PPC_8xx
 static int find_free_data_bpt(void)
 {
 	int i;
@@ -1394,6 +1395,7 @@ static int find_free_data_bpt(void)
 	printf("Couldn't find free breakpoint register\n");
 	return -1;
 }
+#endif
 
 static void print_data_bpts(void)
 {
@@ -1433,9 +1435,10 @@ bpt_cmds(void)
 	cmd = inchar();
 
 	switch (cmd) {
-	case 'd': {	/* bd - hardware data breakpoint */
-		static const char badaddr[] = "Only kernel addresses are permitted for breakpoints\n";
-		int mode;
+#ifndef CONFIG_PPC_8xx
+	static const char badaddr[] = "Only kernel addresses are permitted for breakpoints\n";
+	int mode;
+	case 'd':	/* bd - hardware data breakpoint */
 		if (xmon_is_ro) {
 			printf(xmon_ro_msg);
 			break;
@@ -1468,7 +1471,6 @@ bpt_cmds(void)
 
 		force_enable_xmon();
 		break;
-	}
 
 	case 'i':	/* bi - hardware instr breakpoint */
 		if (xmon_is_ro) {
@@ -1495,6 +1497,7 @@ bpt_cmds(void)
 			force_enable_xmon();
 		}
 		break;
+#endif
 
 	case 'c':
 		if (!scanhex(&a)) {

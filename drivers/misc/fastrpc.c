@@ -247,13 +247,6 @@ static void fastrpc_free_map(struct kref *ref)
 		dma_buf_put(map->buf);
 	}
 
-	if (map->fl) {
-		spin_lock(&map->fl->lock);
-		list_del(&map->node);
-		spin_unlock(&map->fl->lock);
-		map->fl = NULL;
-	}
-
 	kfree(map);
 }
 
@@ -263,12 +256,10 @@ static void fastrpc_map_put(struct fastrpc_map *map)
 		kref_put(&map->refcount, fastrpc_free_map);
 }
 
-static int fastrpc_map_get(struct fastrpc_map *map)
+static void fastrpc_map_get(struct fastrpc_map *map)
 {
-	if (!map)
-		return -ENOENT;
-
-	return kref_get_unless_zero(&map->refcount) ? 0 : -ENOENT;
+	if (map)
+		kref_get(&map->refcount);
 }
 
 static int fastrpc_map_find(struct fastrpc_user *fl, int fd,
@@ -1121,7 +1112,12 @@ err_invoke:
 	fl->init_mem = NULL;
 	fastrpc_buf_free(imem);
 err_alloc:
-	fastrpc_map_put(map);
+	if (map) {
+		spin_lock(&fl->lock);
+		list_del(&map->node);
+		spin_unlock(&fl->lock);
+		fastrpc_map_put(map);
+	}
 err:
 	kfree(args);
 
@@ -1198,8 +1194,10 @@ static int fastrpc_device_release(struct inode *inode, struct file *file)
 		fastrpc_context_put(ctx);
 	}
 
-	list_for_each_entry_safe(map, m, &fl->maps, node)
+	list_for_each_entry_safe(map, m, &fl->maps, node) {
+		list_del(&map->node);
 		fastrpc_map_put(map);
+	}
 
 	list_for_each_entry_safe(buf, b, &fl->mmaps, node) {
 		list_del(&buf->node);

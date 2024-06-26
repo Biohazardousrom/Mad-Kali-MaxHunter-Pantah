@@ -434,7 +434,8 @@ static unsigned int mx51_ecspi_clkdiv(struct spi_imx_data *spi_imx,
 	unsigned int pre, post;
 	unsigned int fin = spi_imx->spi_clk;
 
-	fspi = min(fspi, fin);
+	if (unlikely(fspi > fin))
+		return 0;
 
 	post = fls(fin) - fls(fspi);
 	if (fin > fspi << post)

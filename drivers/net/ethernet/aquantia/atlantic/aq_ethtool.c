@@ -13,7 +13,6 @@
 #include "aq_ptp.h"
 #include "aq_filters.h"
 #include "aq_macsec.h"
-#include "aq_main.h"
 
 #include <linux/ptp_clock_kernel.h>
 
@@ -842,7 +841,7 @@ static int aq_set_ringparam(struct net_device *ndev,
 
 	if (netif_running(ndev)) {
 		ndev_running = true;
-		aq_ndev_close(ndev);
+		dev_close(ndev);
 	}
 
 	cfg->rxds = max(ring->rx_pending, hw_caps->rxds_min);
@@ -858,7 +857,7 @@ static int aq_set_ringparam(struct net_device *ndev,
 		goto err_exit;
 
 	if (ndev_running)
-		err = aq_ndev_open(ndev);
+		err = dev_open(ndev, NULL);
 
 err_exit:
 	return err;

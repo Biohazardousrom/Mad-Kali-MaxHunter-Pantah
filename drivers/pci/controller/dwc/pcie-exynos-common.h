@@ -317,7 +317,6 @@ struct exynos_pcie {
 	struct pinctrl_state	*pin_state[MAX_PCIE_PIN_STATE];
 	struct pcie_eom_result **eom_result;
 	struct notifier_block	itmon_nb;
-	struct notifier_block   panic_nb;
 
 	int wlan_gpio;
 	int ssd_gpio;

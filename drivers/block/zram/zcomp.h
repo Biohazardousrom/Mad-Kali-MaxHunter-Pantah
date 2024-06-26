@@ -50,7 +50,6 @@ struct zcomp {
 	const struct zcomp_operation *op;
 	struct list_head list;
 	struct zcomp_cookie_pool cookie_pool;
-	unsigned long pend_request;
 	struct list_head request_list;
 	spinlock_t request_lock;;
 

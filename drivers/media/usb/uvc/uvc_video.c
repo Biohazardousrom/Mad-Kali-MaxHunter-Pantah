@@ -1308,9 +1308,7 @@ static void uvc_video_decode_meta(struct uvc_streaming *stream,
 	if (has_scr)
 		memcpy(stream->clock.last_scr, scr, 6);
 
-	meta->length = mem[0];
-	meta->flags  = mem[1];
-	memcpy(meta->buf, &mem[2], length - 2);
+	memcpy(&meta->length, mem, length);
 	meta_buf->bytesused += length + sizeof(meta->ns) + sizeof(meta->sof);
 
 	uvc_trace(UVC_TRACE_FRAME,
@@ -1904,17 +1902,6 @@ static int uvc_video_start_transfer(struct uvc_streaming *stream,
 
 		uvc_trace(UVC_TRACE_VIDEO, "Selecting alternate setting %u "
 			"(%u B/frame bandwidth).\n", altsetting, best_psize);
-
-		/*
-		 * Some devices, namely the Logitech C910 and B910, are unable
-		 * to recover from a USB autosuspend, unless the alternate
-		 * setting of the streaming interface is toggled.
-		 */
-		if (stream->dev->quirks & UVC_QUIRK_WAKE_AUTOSUSPEND) {
-			usb_set_interface(stream->dev->udev, intfnum,
-					  altsetting);
-			usb_set_interface(stream->dev->udev, intfnum, 0);
-		}
 
 		ret = usb_set_interface(stream->dev->udev, intfnum, altsetting);
 		if (ret < 0)

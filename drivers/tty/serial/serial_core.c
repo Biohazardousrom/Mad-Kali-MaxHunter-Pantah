@@ -2254,8 +2254,7 @@ int uart_suspend_port(struct uart_driver *drv, struct uart_port *uport)
 
 		spin_lock_irq(&uport->lock);
 		ops->stop_tx(uport);
-		if (!(uport->rs485.flags & SER_RS485_ENABLED))
-			ops->set_mctrl(uport, 0);
+		ops->set_mctrl(uport, 0);
 		ops->stop_rx(uport);
 		spin_unlock_irq(&uport->lock);
 
