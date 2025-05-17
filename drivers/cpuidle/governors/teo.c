@@ -240,8 +240,7 @@ static bool teo_cpu_is_utilized(int cpu, struct teo_cpu *cpu_data)
 static void teo_update(struct cpuidle_driver *drv, struct cpuidle_device *dev)
 {
 	struct teo_cpu *cpu_data = per_cpu_ptr(&teo_cpus, dev->cpu);
-	int i, idx_hit = 0, idx_timer = 0;
-	unsigned int hits, misses;
+	int i, idx_timer = 0, idx_duration = 0;
 	u64 measured_ns;
 
 	if (cpu_data->time_span_ns >= cpu_data->sleep_length_ns) {
@@ -310,29 +309,16 @@ static void teo_update(struct cpuidle_driver *drv, struct cpuidle_device *dev)
 	 * Otherwise, update the "intercepts" metric for the bin fallen into by
 	 * the measured idle duration.
 	 */
-	hits = cpu_data->states[idx_timer].hits;
-	hits -= hits >> DECAY_SHIFT;
-
-	misses = cpu_data->states[idx_timer].misses;
-	misses -= misses >> DECAY_SHIFT;
-
-	if (idx_timer == idx_hit) {
-		hits += PULSE;
+	if (idx_timer == idx_duration) {
+		cpu_data->state_bins[idx_timer].hits += PULSE;
+		cpu_data->recent_idx[i] = -1;
 	} else {
-		misses += PULSE;
-		cpu_data->states[idx_hit].early_hits += PULSE;
+		cpu_data->state_bins[idx_duration].intercepts += PULSE;
+		cpu_data->state_bins[idx_duration].recent++;
+		cpu_data->recent_idx[i] = idx_duration;
 	}
 
-	cpu_data->states[idx_timer].misses = misses;
-	cpu_data->states[idx_timer].hits = hits;
-
-	/*
-	 * Save idle duration values corresponding to non-timer wakeups for
-	 * pattern detection.
-	 */
-	cpu_data->intervals[cpu_data->interval_idx++] = measured_ns;
-	if (cpu_data->interval_idx >= INTERVALS)
-		cpu_data->interval_idx = 0;
+	cpu_data->total += PULSE;
 }
 
 static bool teo_time_ok(u64 interval_ns)
