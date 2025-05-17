@@ -26,24 +26,25 @@
 struct dbg_snapshot_log_item dss_log_items[] = {
 	[DSS_LOG_TASK_ID]	= {DSS_LOG_TASK,	{0, 0, 0, false}, },
 	[DSS_LOG_WORK_ID]	= {DSS_LOG_WORK,	{0, 0, 0, false}, },
-	[DSS_LOG_CPUIDLE_ID]	= {DSS_LOG_CPUIDLE,	{0, 0, 0, false}, },
-	[DSS_LOG_SUSPEND_ID]	= {DSS_LOG_SUSPEND,	{0, 0, 0, false}, },
+	[DSS_LOG_CPUIDLE_ID]	= {DSS_LOG_CPUIDLE,	{0, 0, 0, true}, },
+	[DSS_LOG_SUSPEND_ID]	= {DSS_LOG_SUSPEND,	{0, 0, 0, true}, },
 	[DSS_LOG_IRQ_ID]	= {DSS_LOG_IRQ,		{0, 0, 0, false}, },
 	[DSS_LOG_HRTIMER_ID]	= {DSS_LOG_HRTIMER,	{0, 0, 0, false}, },
-	[DSS_LOG_CLK_ID]	= {DSS_LOG_CLK,		{0, 0, 0, false}, },
-	[DSS_LOG_PMU_ID]	= {DSS_LOG_PMU,		{0, 0, 0, false}, },
-	[DSS_LOG_FREQ_ID]	= {DSS_LOG_FREQ,	{0, 0, 0, false}, },
-	[DSS_LOG_DM_ID]		= {DSS_LOG_DM,		{0, 0, 0, false}, },
-	[DSS_LOG_REGULATOR_ID]	= {DSS_LOG_REGULATOR,	{0, 0, 0, false}, },
-	[DSS_LOG_THERMAL_ID]	= {DSS_LOG_THERMAL,	{0, 0, 0, false}, },
-	[DSS_LOG_ACPM_ID]	= {DSS_LOG_ACPM,	{0, 0, 0, false}, },
-	[DSS_LOG_PRINTK_ID]	= {DSS_LOG_PRINTK,	{0, 0, 0, false}, },
+	[DSS_LOG_CLK_ID]	= {DSS_LOG_CLK,		{0, 0, 0, true}, },
+	[DSS_LOG_PMU_ID]	= {DSS_LOG_PMU,		{0, 0, 0, true}, },
+	[DSS_LOG_FREQ_ID]	= {DSS_LOG_FREQ,	{0, 0, 0, true}, },
+	[DSS_LOG_DM_ID]		= {DSS_LOG_DM,		{0, 0, 0, true}, },
+	[DSS_LOG_REGULATOR_ID]	= {DSS_LOG_REGULATOR,	{0, 0, 0, true}, },
+	[DSS_LOG_THERMAL_ID]	= {DSS_LOG_THERMAL,	{0, 0, 0, true}, },
+	[DSS_LOG_ACPM_ID]	= {DSS_LOG_ACPM,	{0, 0, 0, true}, },
+	[DSS_LOG_PRINTK_ID]	= {DSS_LOG_PRINTK,	{0, 0, 0, true}, },
 };
 
 /*  Internal interface variable */
 struct dbg_snapshot_log_misc dss_log_misc;
 static char dss_freq_name[SZ_32][SZ_8];
 static unsigned int dss_freq_size;
+static bool dss_last_info_enabled;
 
 #define dss_get_log(item)						\
 long dss_get_len_##item##_log(void) {					\
@@ -252,7 +253,11 @@ static unsigned long dbg_snapshot_suspend(const char *log, struct device *dev,
 		(ARRAY_SIZE(dss_log->suspend) - 1);
 
 	dss_log->suspend[i].time = local_clock();
-	dss_log->suspend[i].log = log ? log : NULL;
+	if (log && dev && dev->driver && dev->driver->name && strlen(dev->driver->name)) {
+		dss_log->suspend[i].log = dev->driver->name;
+	} else {
+		dss_log->suspend[i].log = log;
+	}
 	dss_log->suspend[i].event = event;
 	dss_log->suspend[i].dev = dev ? dev_name(dev) : "";
 	dss_log->suspend[i].core = raw_smp_processor_id();
@@ -607,6 +612,8 @@ static void dbg_snapshot_print_lastinfo(void)
 {
 	int cpu;
 
+	if (!dss_last_info_enabled)
+		return;
 	pr_info("<last info>\n");
 	for (cpu = 0; cpu < DSS_NR_CPUS; cpu++) {
 		pr_info("CPU ID: %d ----------------------------------\n", cpu);
@@ -649,10 +656,16 @@ static void dbg_snapshot_print_freqinfo(void)
 #define arch_irq_stat() 0
 #endif
 
+#define IRQ_THRESHOLD 50
+
 static void dbg_snapshot_print_irq(void)
 {
 	int i, cpu;
 	u64 sum = 0;
+	struct timespec64 tp;
+	unsigned long long irq_filter = 0;
+	ktime_get_boottime_ts64(&tp);
+	irq_filter = tp.tv_sec * IRQ_THRESHOLD;
 
 	for_each_possible_cpu(cpu)
 		sum += kstat_cpu_irqs_sum(cpu);
@@ -679,7 +692,7 @@ static void dbg_snapshot_print_irq(void)
 		for_each_possible_cpu(cpu)
 			irq_stat += *per_cpu_ptr(desc->kstat_irqs, cpu);
 
-		if (!irq_stat)
+		if (!irq_stat || irq_stat < irq_filter)
 			continue;
 
 		if (desc->action && desc->action->name)
@@ -709,7 +722,15 @@ void dbg_snapshot_init_log(void)
 {
 	struct dbg_snapshot_item *item = &dss_items[DSS_ITEM_KEVENTS_ID];
 	struct dbg_snapshot_log_item *log_item;
+	int i;
 
+	if (!item->entry.enabled) {
+		for (i = 0; i < ARRAY_SIZE(dss_log_items); i++)
+			dss_log_items[i].entry.enabled = false;
+		return;
+	}
+
+	dss_last_info_enabled = true;
 	log_item_set_filed(TASK, task);
 	log_item_set_filed(WORK, work);
 	log_item_set_filed(CPUIDLE, cpuidle);

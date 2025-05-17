@@ -788,6 +788,9 @@ EXPORT_SYMBOL_GPL(usb_gadget_disconnect);
  * usb_gadget_activate() is called.  For example, user mode components may
  * need to be activated before the system can talk to hosts.
  *
+ * This routine may sleep; it must not be called in interrupt context
+ * (such as from within a gadget driver's disconnect() callback).
+ *
  * Returns zero on success, else negative errno.
  */
 int usb_gadget_deactivate(struct usb_gadget *gadget)
@@ -826,6 +829,8 @@ EXPORT_SYMBOL_GPL(usb_gadget_deactivate);
  *
  * This routine activates gadget which was previously deactivated with
  * usb_gadget_deactivate() call. It calls usb_gadget_connect() if needed.
+ *
+ * This routine may sleep; it must not be called in interrupt context.
  *
  * Returns zero on success, else negative errno.
  */
@@ -1384,6 +1389,11 @@ int usb_add_gadget(struct usb_gadget *gadget)
 	if (ret)
 		goto err_del_udc;
 
+	ret = sysfs_create_link(&udc->dev.kobj,
+				&gadget->dev.kobj, "gadget");
+	if (ret)
+		goto err_del_udc;
+
 	mutex_unlock(&udc_lock);
 
 	return 0;
@@ -1478,19 +1488,23 @@ static void usb_gadget_remove_driver(struct usb_udc *udc)
 	dev_dbg(&udc->dev, "unregistering UDC driver [%s]\n",
 			udc->driver->function);
 
-	kobject_uevent(&udc->dev.kobj, KOBJ_CHANGE);
-
 	mutex_lock(&connect_lock);
 	usb_gadget_disconnect_locked(udc->gadget);
 	usb_gadget_disable_async_callbacks(udc);
 	if (udc->gadget->irq)
 		synchronize_irq(udc->gadget->irq);
+	mutex_unlock(&connect_lock);
+
 	udc->driver->unbind(udc->gadget);
+
+	mutex_lock(&connect_lock);
 	usb_gadget_udc_stop_locked(udc);
 	mutex_unlock(&connect_lock);
 
 	udc->driver = NULL;
 	udc->gadget->dev.driver = NULL;
+
+	kobject_uevent(&udc->dev.kobj, KOBJ_CHANGE);
 }
 
 /**
@@ -1522,6 +1536,7 @@ void usb_del_gadget(struct usb_gadget *gadget)
 	mutex_unlock(&udc_lock);
 
 	kobject_uevent(&udc->dev.kobj, KOBJ_REMOVE);
+	sysfs_remove_link(&udc->dev.kobj, "gadget");
 	flush_work(&gadget->work);
 	device_unregister(&udc->dev);
 	device_del(&gadget->dev);

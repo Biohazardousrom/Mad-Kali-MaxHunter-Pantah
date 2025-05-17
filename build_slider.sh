@@ -8,6 +8,32 @@ function exit_if_error {
   fi
 }
 
+function add_boot_hash_footer {
+  eval `grep "\<BUILD_GKI_BOOT_IMG_LZ4_SIZE=" aosp/build.config.gki.aarch64`
+  local spl_month=$((($(date +'%m') + 3) % 12))
+  local spl_year="$(date +'%Y')"
+  if [ $((${spl_month} % 3)) -gt 0 ]; then
+    # Round up to the next quarterly platform release (QPR) month
+    spl_month=$((${spl_month} + 3 - (${spl_month} % 3)))
+  fi
+  if [ "${spl_month}" -lt "$(date +'%m')" ]; then
+    # rollover to the next year
+    spl_year="$((${spl_year} + 1))"
+  fi
+  local spl_date=$(printf "%d-%02d-05\n" ${spl_year} ${spl_month})
+
+  local additional_props=""
+  if [ -n "${spl_date}" ]; then
+    additional_props="--prop com.android.build.boot.security_patch:${spl_date}"
+  fi
+
+  build/kernel/build-tools/path/linux-x86/avbtool add_hash_footer \
+    --image ${DIST_DIR}/boot.img \
+    --partition_name boot \
+    --partition_size ${BUILD_GKI_BOOT_IMG_LZ4_SIZE} \
+    ${additional_props}
+}
+
 BUILD_STAGING_KERNEL=${BUILD_STAGING_KERNEL:-0}
 TRIM_NONLISTED_KMI=${TRIM_NONLISTED_KMI:-1}
 LTO=${LTO:-thin}
@@ -78,6 +104,12 @@ DEVICE_KERNEL_BUILD_CONFIG=${DEVICE_KERNEL_BUILD_CONFIG} \
   ./build_mixed.sh "$@"
 
 exit_if_error $? "Failed to create mixed build"
+
+if [ -n "${USING_PREBUILTS}" ]; then
+  # Add an SPL to the prebuilt boot image so that you don't have to wipe your
+  # device when flashing. This is handled already when building the kernel.
+  add_boot_hash_footer
+fi
 
 if [ -f ${GKI_KERNEL_PREBUILTS_DIR}/vmlinux ]; then
   SHA_FILE=vmlinux

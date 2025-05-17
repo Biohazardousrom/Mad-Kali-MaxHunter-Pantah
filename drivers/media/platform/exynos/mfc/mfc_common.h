@@ -253,6 +253,8 @@
 	((m == MFC_MATRIX_COEFF_BT2020) || (m == MFC_MATRIX_COEFF_BT2020_CONSTANT)) &&		\
 	((t == MFC_TRANSFER_SMPTE_170M) || (t == MFC_TRANSFER_ST2084) || (t == MFC_TRANSFER_HLG)))
 
+#define IS_NO_INFOLOG(ctx)		((ctx)->dec_priv && (ctx)->dec_priv->is_multiframe)
+
 /* Extra information for Decoder */
 #define	DEC_SET_DUAL_DPB		(1 << 0)
 #define	DEC_SET_DYNAMIC_DPB		(1 << 1)
@@ -297,5 +299,8 @@
 /* Low memory check */
 #define IS_LOW_MEM			(totalram_pages() <= ((SZ_1G + SZ_512M) >> PAGE_SHIFT))
 #define SZ_600M				(6 * 1024 * 1024)
+
+/* Min Bitrate for VT (100kbps) */
+#define VT_MIN_BITRATE			(3500 * 30)
 
 #endif /* __MFC_COMMON_H */

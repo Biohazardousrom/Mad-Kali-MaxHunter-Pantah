@@ -162,6 +162,7 @@ struct exynos_uart_port {
 	struct pinctrl_state	*uart_pinctrl_default;
 	struct pinctrl *pinctrl;
 	unsigned int		rts_control;
+	unsigned int		rts_alive_control;
 	unsigned int		rts_trig_level;
 
 	struct regmap			*usi_reg;
@@ -184,6 +185,7 @@ struct exynos_uart_port {
 	struct uart_local_buf		uart_local_buf;
 	struct logbuffer *log;
 	bool show_uart_logging_packets;
+	unsigned char suspending;
 };
 
 /* conversion functions */
@@ -353,6 +355,38 @@ static void uart_sfr_dump(struct exynos_uart_port *ourport)
 		, readl(port->membase + S3C64XX_UINTP)
 		, readl(port->membase + S3C64XX_UINTM)
 	);
+}
+
+static void disable_auto_flow_control(struct exynos_uart_port *ourport)
+{
+	struct uart_port *port = &ourport->port;
+	unsigned long flags;
+	unsigned int umcon;
+
+	spin_lock_irqsave(&port->lock, flags);
+
+	/* disable auto flow control & set nRTS for High */
+	umcon = rd_regl(port, S3C2410_UMCON);
+	umcon &= ~(S3C2410_UMCOM_AFC | S3C2410_UMCOM_RTS_LOW);
+	wr_regl(port, S3C2410_UMCON, umcon);
+
+	spin_unlock_irqrestore(&port->lock, flags);
+}
+
+static void enable_auto_flow_control(struct exynos_uart_port *ourport)
+{
+	struct uart_port *port = &ourport->port;
+	unsigned long flags;
+	unsigned int umcon;
+
+	spin_lock_irqsave(&port->lock, flags);
+
+	/* enable auto flow control */
+	umcon = rd_regl(port, S3C2410_UMCON);
+	umcon |= S3C2410_UMCOM_AFC;
+	wr_regl(port, S3C2410_UMCON, umcon);
+
+	spin_unlock_irqrestore(&port->lock, flags);
 }
 
 static void change_uart_gpio(int value, struct exynos_uart_port *ourport)
@@ -2481,8 +2515,6 @@ static int exynos_serial_notifier(struct notifier_block *self,
 {
 	struct exynos_uart_port *ourport;
 	struct uart_port *port;
-	unsigned long flags;
-	unsigned int umcon;
 
 	switch (cmd) {
 	case SICD_ENTER:
@@ -2492,14 +2524,11 @@ static int exynos_serial_notifier(struct notifier_block *self,
 			if (port->state->pm_state == UART_PM_STATE_OFF)
 				continue;
 
-			spin_lock_irqsave(&port->lock, flags);
+			if (ourport->suspending)
+				continue;
 
-			/* disable auto flow control & set nRTS for High */
-			umcon = rd_regl(port, S3C2410_UMCON);
-			umcon &= ~(S3C2410_UMCOM_AFC | S3C2410_UMCOM_RTS_LOW);
-			wr_regl(port, S3C2410_UMCON, umcon);
-
-			spin_unlock_irqrestore(&port->lock, flags);
+			if (ourport->rts_alive_control)
+				disable_auto_flow_control(ourport);
 
 			if (ourport->rts_control)
 				change_uart_gpio(RTS_PINCTRL, ourport);
@@ -2515,16 +2544,11 @@ static int exynos_serial_notifier(struct notifier_block *self,
 			if (port->state->pm_state == UART_PM_STATE_OFF)
 				continue;
 
-			spin_lock_irqsave(&port->lock, flags);
+			if (ourport->suspending)
+				continue;
 
-			if (!ourport->dbg_uart_ch) {
-				/* enable auto flow control */
-				umcon = rd_regl(port, S3C2410_UMCON);
-				umcon |= S3C2410_UMCOM_AFC;
-				wr_regl(port, S3C2410_UMCON, umcon);
-			}
-
-			spin_unlock_irqrestore(&port->lock, flags);
+			if (ourport->rts_alive_control)
+				enable_auto_flow_control(ourport);
 
 			if (ourport->rts_control)
 				change_uart_gpio(DEFAULT_PINCTRL, ourport);
@@ -2677,6 +2701,13 @@ static int exynos_serial_probe(struct platform_device *pdev)
 					"Can't get Default pinstate!!!\n");
 		}
 	}
+
+	if (of_get_property(pdev->dev.of_node,
+			    "samsung,rts-alive-control", NULL))
+		ourport->rts_alive_control = 1;
+	else
+		ourport->rts_alive_control = 0;
+
 	if (!of_property_read_u32(pdev->dev.of_node, "samsung,rts-trig-level",
 				  &rts_trig_level)) {
 		ourport->rts_trig_level = rts_trig_level;
@@ -2766,6 +2797,7 @@ static int exynos_serial_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "failed to create sysfs file.\n");
 
 	ourport->dbg_mode = 0;
+	ourport->suspending = 0;
 
 	if (ourport->uart_logging == 1) {
 		/* Allocate memory for UART logging */
@@ -2823,12 +2855,16 @@ static int exynos_serial_suspend(struct device *dev)
 	unsigned int ucon;
 
 	if (port) {
+		ourport->suspending = 1;
 		/*
 		 * If rts line must be protected while suspending
 		 * we change the gpio pad as output high
 		 */
 		if (ourport->rts_control)
 			change_uart_gpio(RTS_PINCTRL, ourport);
+
+		if (ourport->rts_alive_control)
+			disable_auto_flow_control(ourport);
 
 		usleep_range(200, 300);//delay for sfr update
 		exynos_serial_rx_fifo_wait(ourport);
@@ -2855,6 +2891,8 @@ static int exynos_serial_suspend(struct device *dev)
 		}
 		if (ourport->dbg_mode & UART_DBG_MODE)
 			dev_err(dev, "UART suspend notification for tty framework.\n");
+
+		ourport->suspending = 0;
 	}
 
 	return 0;
@@ -2909,8 +2947,14 @@ static int exynos_serial_resume(struct device *dev)
 					portaddrl(port, S3C64XX_UINTM));
 		}
 
+		if (ourport->rts_control || ourport->rts_alive_control)
+			usleep_range(200, 300);//delay for uart port resume
+
 		if (ourport->rts_control)
 			change_uart_gpio(DEFAULT_PINCTRL, ourport);
+
+		if (ourport->rts_alive_control)
+			enable_auto_flow_control(ourport);
 
 		if (ourport->dbg_mode & UART_DBG_MODE)
 			dev_err(dev, "UART resume notification for tty framework.\n");

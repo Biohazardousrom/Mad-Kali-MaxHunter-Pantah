@@ -42,6 +42,7 @@ enum vendor_group {
 
 struct vendor_binder_task_struct {
 	unsigned int uclamp[UCLAMP_CNT];
+	bool uclamp_fork_reset;
 	bool prefer_idle;
 	bool active;
 };
@@ -61,9 +62,11 @@ struct vendor_task_struct {
 	enum vendor_group group;
 	unsigned long direct_reclaim_ts;
 	struct list_head node;
-	bool queued_to_list;
+	int queued_to_list;
 	bool uclamp_fork_reset;
 	bool prefer_idle;
+	bool prefer_high_cap;
+	int auto_uclamp_max_flags;	// Relative to cpu instead of absolute
 	struct uclamp_filter uclamp_filter;
 	int orig_prio;
 
@@ -71,6 +74,7 @@ struct vendor_task_struct {
 	struct vendor_binder_task_struct binder_task;
 	/* parameters for RT inheritance */
 	unsigned int uclamp_pi[UCLAMP_CNT];
+	u64 runnable_start_ns;
 };
 
 ANDROID_VENDOR_CHECK_SIZE_ALIGN(u64 android_vendor_data1[64], struct vendor_task_struct t);
