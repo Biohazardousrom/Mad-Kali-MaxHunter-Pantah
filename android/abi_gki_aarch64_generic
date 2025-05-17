@@ -132,6 +132,7 @@
   bpf_trace_run7
   bpf_trace_run8
   bpf_trace_run9
+  bprm_change_interp
   build_skb
   bus_find_device
   bus_for_each_dev
@@ -197,6 +198,7 @@
   class_interface_unregister
   __class_register
   class_unregister
+  clear_inode
   clear_page
   __ClearPageMovable
   clk_disable
@@ -206,6 +208,7 @@
   __clk_get_name
   clk_get_parent
   clk_get_rate
+  clk_get_sys
   clk_hw_get_name
   clk_hw_get_parent
   __clk_is_enabled
@@ -254,6 +257,7 @@
   contig_page_data
   _copy_from_iter
   _copy_from_iter_full
+  copy_string_kernel
   _copy_to_iter
   __cpu_active_mask
   cpu_all_bits
@@ -320,6 +324,7 @@
   crc32_le
   crc8
   crc8_populate_msb
+  crc_ccitt
   crypto_aead_decrypt
   crypto_aead_encrypt
   crypto_aead_setauthsize
@@ -355,6 +360,8 @@
   csum_tcpudp_nofold
   _ctype
   datagram_poll
+  d_drop
+  d_instantiate
   deactivate_task
   debugfs_attr_read
   debugfs_attr_write
@@ -381,6 +388,7 @@
   del_gendisk
   del_timer
   del_timer_sync
+  dentry_open
   desc_to_gpio
   destroy_workqueue
   dev_alloc_name
@@ -826,8 +834,19 @@
   drm_writeback_connector_init
   drm_writeback_queue_job
   drm_writeback_signal_completion
+  drop_nlink
   dump_backtrace
   dump_stack
+  dvb_dmx_init
+  dvb_dmx_release
+  dvb_dmx_swfilter
+  dvb_dmxdev_init
+  dvb_dmxdev_release
+  dvb_frontend_detach
+  dvb_register_adapter
+  dvb_register_frontend
+  dvb_unregister_adapter
+  dvb_unregister_frontend
   dwc3_send_gadget_ep_cmd
   dwc3_stop_active_transfer
   dw_handle_msi_irq
@@ -877,6 +896,7 @@
   find_vm_area
   find_vpid
   finish_wait
+  firmware_request_cache
   firmware_request_nowarn
   flush_dcache_page
   flush_delayed_work
@@ -1061,8 +1081,23 @@
   idr_preload
   idr_remove
   ieee80211_channel_to_freq_khz
+  ieee80211_ctstoself_duration
+  ieee80211_ctstoself_get
   ieee80211_freq_khz_to_channel
+  ieee80211_generic_frame_duration
   ieee80211_get_channel_khz
+  __ieee80211_get_radio_led_name
+  __ieee80211_get_rx_led_name
+  __ieee80211_get_tx_led_name
+  ieee80211_queue_stopped
+  ieee80211_rate_control_register
+  ieee80211_rate_control_unregister
+  ieee80211_resume_disconnect
+  ieee80211_rts_duration
+  ieee80211_rts_get
+  ieee80211_send_bar
+  ieee80211_start_tx_ba_session
+  ieee80211_tx_status_ext
   ieee80211_hdrlen
   iio_device_unregister
   import_iovec
@@ -1286,18 +1321,22 @@
   kvfree_call_rcu
   kvmalloc_node
   led_classdev_register_ext
+  led_classdev_resume
+  led_classdev_suspend
   led_classdev_unregister
   __list_add_valid
   __list_del_entry_valid
   list_sort
   __local_bh_enable_ip
   __lock_page
+  lockref_get
   lock_sock_nested
   log_abnormal_wakeup_reason
   __log_post_read_mmio
   __log_read_mmio
   log_threaded_irq_wakeup_reason
   __log_write_mmio
+  lookup_one_len
   loops_per_jiffy
   lru_cache_disable
   lru_cache_enable
@@ -1506,6 +1545,7 @@
   of_thermal_is_trip_valid
   of_translate_address
   of_usb_host_tpl_support
+  open_exec
   page_endio
   page_frag_alloc
   __page_frag_cache_drain
@@ -1761,6 +1801,7 @@
   regcache_drop_region
   regcache_mark_dirty
   regcache_sync
+  __register_binfmt
   register_blkdev
   __register_chrdev
   register_chrdev_region
@@ -1829,6 +1870,7 @@
   release_sock
   remap_pfn_range
   remap_vmalloc_range
+  remove_arg_zero
   remove_cpu
   remove_proc_entry
   remove_wait_queue
@@ -1957,8 +1999,11 @@
   simple_attr_read
   simple_attr_release
   simple_attr_write
+  simple_fill_super
   simple_open
+  simple_pin_fs
   simple_read_from_buffer
+  simple_release_fs
   simple_strtol
   simple_strtoll
   simple_strtoul
@@ -2131,6 +2176,7 @@
   strcspn
   stream_open
   strim
+  string_unescape
   strlcat
   strlcpy
   strlen
@@ -2155,6 +2201,8 @@
   suspend_set_ops
   __sw_hweight32
   __sw_hweight64
+  __symbol_get
+  __symbol_put
   sync_file_create
   sync_file_get_fence
   synchronize_irq
@@ -2586,6 +2634,7 @@
   unlock_page
   unmap_mapping_range
   unpin_user_page
+  unregister_binfmt
   unregister_blkdev
   __unregister_chrdev
   unregister_chrdev_region
@@ -2642,6 +2691,7 @@
   usb_put_hcd
   usb_register_notify
   usb_remove_hcd
+  usb_reset_device
   usb_role_switch_get_drvdata
   usb_role_switch_register
   usb_role_switch_unregister
@@ -2652,6 +2702,7 @@
   __usecs_to_jiffies
   usleep_range
   uuid_gen
+  v4l2_ctrl_auto_cluster
   v4l2_ctrl_handler_free
   v4l2_ctrl_handler_init_class
   v4l2_ctrl_log_status
@@ -2683,6 +2734,7 @@
   v4l2_m2m_next_buf
   v4l2_m2m_qbuf
   v4l2_m2m_release
+  v4l2_spi_new_subdev
   vabits_actual
   vb2_buffer_done
   vb2_common_vm_ops
@@ -2694,6 +2746,7 @@
   vb2_fop_poll
   vb2_fop_read
   vb2_fop_release
+  vb2_fop_write
   vb2_ioctl_create_bufs
   vb2_ioctl_dqbuf
   vb2_ioctl_expbuf
@@ -2778,6 +2831,8 @@
   wiphy_free
   wiphy_new_nm
   wiphy_register
+  wiphy_rfkill_start_polling
+  wiphy_rfkill_stop_polling
   wiphy_unregister
   wireless_send_event
   woken_wake_function
