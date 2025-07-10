@@ -42,7 +42,7 @@ static ssize_t period_show(struct device *child,
 
 	pwm_get_state(pwm, &state);
 
-	return sprintf(buf, "%llu\n", state.period);
+	return sysfs_emit(buf, "%llu\n", state.period);
 }
 
 static ssize_t period_store(struct device *child,
@@ -77,7 +77,7 @@ static ssize_t duty_cycle_show(struct device *child,
 
 	pwm_get_state(pwm, &state);
 
-	return sprintf(buf, "%llu\n", state.duty_cycle);
+	return sysfs_emit(buf, "%llu\n", state.duty_cycle);
 }
 
 static ssize_t duty_cycle_store(struct device *child,
@@ -112,7 +112,7 @@ static ssize_t enable_show(struct device *child,
 
 	pwm_get_state(pwm, &state);
 
-	return sprintf(buf, "%d\n", state.enabled);
+	return sysfs_emit(buf, "%d\n", state.enabled);
 }
 
 static ssize_t enable_store(struct device *child,
@@ -171,7 +171,7 @@ static ssize_t polarity_show(struct device *child,
 		break;
 	}
 
-	return sprintf(buf, "%s\n", polarity);
+	return sysfs_emit(buf, "%s\n", polarity);
 }
 
 static ssize_t polarity_store(struct device *child,
@@ -212,30 +212,7 @@ static ssize_t capture_show(struct device *child,
 	if (ret)
 		return ret;
 
-	return sprintf(buf, "%u %u\n", result.period, result.duty_cycle);
-}
-
-static ssize_t output_type_show(struct device *child,
-			     struct device_attribute *attr,
-			     char *buf)
-{
-	const struct pwm_device *pwm = child_to_pwm_device(child);
-	const char *output_type = "unknown";
-	struct pwm_state state;
-
-	pwm_get_state(pwm, &state);
-	switch (state.output_type) {
-	case PWM_OUTPUT_FIXED:
-		output_type = "fixed";
-		break;
-	case PWM_OUTPUT_MODULATED:
-		output_type = "modulated";
-		break;
-	default:
-		break;
-	}
-
-	return snprintf(buf, PAGE_SIZE, "%s\n", output_type);
+	return sysfs_emit(buf, "%u %u\n", result.period, result.duty_cycle);
 }
 
 static DEVICE_ATTR_RW(period);
@@ -243,7 +220,6 @@ static DEVICE_ATTR_RW(duty_cycle);
 static DEVICE_ATTR_RW(enable);
 static DEVICE_ATTR_RW(polarity);
 static DEVICE_ATTR_RO(capture);
-static DEVICE_ATTR_RO(output_type);
 
 static struct attribute *pwm_attrs[] = {
 	&dev_attr_period.attr,
@@ -251,7 +227,6 @@ static struct attribute *pwm_attrs[] = {
 	&dev_attr_enable.attr,
 	&dev_attr_polarity.attr,
 	&dev_attr_capture.attr,
-	&dev_attr_output_type.attr,
 	NULL
 };
 ATTRIBUTE_GROUPS(pwm);
@@ -386,7 +361,7 @@ static ssize_t npwm_show(struct device *parent, struct device_attribute *attr,
 {
 	const struct pwm_chip *chip = dev_get_drvdata(parent);
 
-	return sprintf(buf, "%u\n", chip->npwm);
+	return sysfs_emit(buf, "%u\n", chip->npwm);
 }
 static DEVICE_ATTR_RO(npwm);
 
@@ -465,7 +440,7 @@ static int pwm_class_resume_npwm(struct device *parent, unsigned int npwm)
 	return ret;
 }
 
-static int __maybe_unused pwm_class_suspend(struct device *parent)
+static int pwm_class_suspend(struct device *parent)
 {
 	struct pwm_chip *chip = dev_get_drvdata(parent);
 	unsigned int i;
@@ -506,20 +481,20 @@ static int __maybe_unused pwm_class_suspend(struct device *parent)
 	return ret;
 }
 
-static int __maybe_unused pwm_class_resume(struct device *parent)
+static int pwm_class_resume(struct device *parent)
 {
 	struct pwm_chip *chip = dev_get_drvdata(parent);
 
 	return pwm_class_resume_npwm(parent, chip->npwm);
 }
 
-static SIMPLE_DEV_PM_OPS(pwm_class_pm_ops, pwm_class_suspend, pwm_class_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(pwm_class_pm_ops, pwm_class_suspend, pwm_class_resume);
 
 static struct class pwm_class = {
 	.name = "pwm",
 	.owner = THIS_MODULE,
 	.dev_groups = pwm_chip_groups,
-	.pm = &pwm_class_pm_ops,
+	.pm = pm_sleep_ptr(&pwm_class_pm_ops),
 };
 
 static int pwmchip_sysfs_match(struct device *parent, const void *data)

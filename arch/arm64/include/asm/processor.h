@@ -8,9 +8,6 @@
 #ifndef __ASM_PROCESSOR_H
 #define __ASM_PROCESSOR_H
 
-#define KERNEL_DS		UL(-1)
-#define USER_DS			((UL(1) << VA_BITS) - 1)
-
 /*
  * On arm64 systems, unaligned accesses by the CPU are cheap, and so there is
  * no point in shifting all network buffers by 2 bytes just to make some IP
@@ -56,6 +53,7 @@
 
 #define DEFAULT_MAP_WINDOW_64	(UL(1) << VA_BITS_MIN)
 #define TASK_SIZE_64		(UL(1) << vabits_actual)
+#define TASK_SIZE_MAX		(UL(1) << VA_BITS)
 
 #ifdef CONFIG_COMPAT
 #if defined(CONFIG_ARM64_64K_PAGES) && defined(CONFIG_KUSER_HELPERS)
@@ -95,8 +93,8 @@
 #endif /* CONFIG_COMPAT */
 
 #ifndef CONFIG_ARM64_FORCE_52BIT
-#define arch_get_mmap_end(addr) ((addr > DEFAULT_MAP_WINDOW) ? TASK_SIZE :\
-				DEFAULT_MAP_WINDOW)
+#define arch_get_mmap_end(addr, len, flags) \
+		(((addr) > DEFAULT_MAP_WINDOW) ? TASK_SIZE : DEFAULT_MAP_WINDOW)
 
 #define arch_get_mmap_base(addr, base) ((addr > DEFAULT_MAP_WINDOW) ? \
 					base + TASK_SIZE - DEFAULT_MAP_WINDOW :\
@@ -117,6 +115,12 @@ struct debug_info {
 	struct perf_event	*hbp_break[ARM_MAX_BRP];
 	struct perf_event	*hbp_watch[ARM_MAX_WRP];
 #endif
+};
+
+enum vec_type {
+	ARM64_VEC_SVE = 0,
+	ARM64_VEC_SME,
+	ARM64_VEC_MAX,
 };
 
 struct cpu_context {
@@ -149,29 +153,87 @@ struct thread_struct {
 		struct user_fpsimd_state fpsimd_state;
 	} uw;
 
-	/*
-	 * Unused now that commit 74555f39924d ("ANDROID: vendor_hooks: FPSIMD
-	 * save/restore by using vendor_hooks") is reverted, but remains to
-	 * preserve the ABI in the android13-5.10 branch.
-	 */
 	ANDROID_VENDOR_DATA(1);
 
 	unsigned int		fpsimd_cpu;
 	void			*sve_state;	/* SVE registers, if any */
-	unsigned int		sve_vl;		/* SVE vector length */
-	unsigned int		sve_vl_onexec;	/* SVE vl after next exec */
+	void			*za_state;	/* ZA register, if any */
+	unsigned int		vl[ARM64_VEC_MAX];	/* vector length */
+	unsigned int		vl_onexec[ARM64_VEC_MAX]; /* vl after next exec */
 	unsigned long		fault_address;	/* fault info */
 	unsigned long		fault_code;	/* ESR_EL1 value */
 	struct debug_info	debug;		/* debugging */
 #ifdef CONFIG_ARM64_PTR_AUTH
 	struct ptrauth_keys_user	keys_user;
+#ifdef CONFIG_ARM64_PTR_AUTH_KERNEL
 	struct ptrauth_keys_kernel	keys_kernel;
+#endif
 #endif
 #ifdef CONFIG_ARM64_MTE
 	u64			mte_ctrl;
 #endif
 	u64			sctlr_user;
+	u64			svcr;
+	u64			tpidr2_el0;
 };
+
+static inline unsigned int thread_get_vl(struct thread_struct *thread,
+					 enum vec_type type)
+{
+	return thread->vl[type];
+}
+
+static inline unsigned int thread_get_sve_vl(struct thread_struct *thread)
+{
+	return thread_get_vl(thread, ARM64_VEC_SVE);
+}
+
+static inline unsigned int thread_get_sme_vl(struct thread_struct *thread)
+{
+	return thread_get_vl(thread, ARM64_VEC_SME);
+}
+
+static inline unsigned int thread_get_cur_vl(struct thread_struct *thread)
+{
+	if (system_supports_sme() && (thread->svcr & SVCR_SM_MASK))
+		return thread_get_sme_vl(thread);
+	else
+		return thread_get_sve_vl(thread);
+}
+
+unsigned int task_get_vl(const struct task_struct *task, enum vec_type type);
+void task_set_vl(struct task_struct *task, enum vec_type type,
+		 unsigned long vl);
+void task_set_vl_onexec(struct task_struct *task, enum vec_type type,
+			unsigned long vl);
+unsigned int task_get_vl_onexec(const struct task_struct *task,
+				enum vec_type type);
+
+static inline unsigned int task_get_sve_vl(const struct task_struct *task)
+{
+	return task_get_vl(task, ARM64_VEC_SVE);
+}
+
+static inline unsigned int task_get_sme_vl(const struct task_struct *task)
+{
+	return task_get_vl(task, ARM64_VEC_SME);
+}
+
+static inline void task_set_sve_vl(struct task_struct *task, unsigned long vl)
+{
+	task_set_vl(task, ARM64_VEC_SVE, vl);
+}
+
+static inline unsigned int task_get_sve_vl_onexec(const struct task_struct *task)
+{
+	return task_get_vl_onexec(task, ARM64_VEC_SVE);
+}
+
+static inline void task_set_sve_vl_onexec(struct task_struct *task,
+					  unsigned long vl)
+{
+	task_set_vl_onexec(task, ARM64_VEC_SVE, vl);
+}
 
 #define SCTLR_USER_MASK                                                        \
 	(SCTLR_ELx_ENIA | SCTLR_ELx_ENIB | SCTLR_ELx_ENDA | SCTLR_ELx_ENDB |   \
@@ -264,10 +326,7 @@ static __always_inline bool is_ttbr1_addr(unsigned long addr)
 /* Forward declaration, a strange C thing */
 struct task_struct;
 
-/* Free all resources held by a thread. */
-extern void release_thread(struct task_struct *);
-
-unsigned long get_wchan(struct task_struct *p);
+unsigned long __get_wchan(struct task_struct *p);
 
 void update_sctlr_el1(u64 sctlr);
 
@@ -318,9 +377,11 @@ extern void __init minsigstksz_setup(void);
  */
 #include <asm/fpsimd.h>
 
-/* Userspace interface for PR_SVE_{SET,GET}_VL prctl()s: */
+/* Userspace interface for PR_S[MV]E_{SET,GET}_VL prctl()s: */
 #define SVE_SET_VL(arg)	sve_set_current_vl(arg)
 #define SVE_GET_VL()	sve_get_current_vl()
+#define SME_SET_VL(arg)	sme_set_current_vl(arg)
+#define SME_GET_VL()	sme_get_current_vl()
 
 /* PR_PAC_RESET_KEYS prctl */
 #define PAC_RESET_KEYS(tsk, arg)	ptrauth_prctl_reset_keys(tsk, arg)
@@ -345,13 +406,11 @@ long get_tagged_addr_ctrl(struct task_struct *task);
  * of header definitions for the use of task_stack_page.
  */
 
-#define current_top_of_stack()								\
-({											\
-	struct stack_info _info;							\
-	BUG_ON(!on_accessible_stack(current, current_stack_pointer, 1, &_info));	\
-	_info.high;									\
-})
-#define on_thread_stack()	(on_task_stack(current, current_stack_pointer, 1, NULL))
+/*
+ * The top of the current task's task stack
+ */
+#define current_top_of_stack()	((unsigned long)current->stack + THREAD_SIZE)
+#define on_thread_stack()	(on_task_stack(current, current_stack_pointer, 1))
 
 #endif /* __ASSEMBLY__ */
 #endif /* __ASM_PROCESSOR_H */

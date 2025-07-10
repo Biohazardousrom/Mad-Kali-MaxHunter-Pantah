@@ -7,7 +7,7 @@
 
 #include <stdbool.h>
 #include <errno.h>
-#include "objtool.h"
+#include <objtool/objtool.h>
 
 #define UNSUPPORTED(name)						\
 ({									\
@@ -15,17 +15,12 @@
 	return ENOSYS;							\
 })
 
-int __weak check(struct objtool_file *file)
-{
-	UNSUPPORTED("check subcommand");
-}
-
 int __weak orc_dump(const char *_objname)
 {
-	UNSUPPORTED("orc");
+	UNSUPPORTED("ORC");
 }
 
 int __weak orc_create(struct objtool_file *file)
 {
-	UNSUPPORTED("orc");
+	UNSUPPORTED("ORC");
 }

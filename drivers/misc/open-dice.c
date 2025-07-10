@@ -96,13 +96,13 @@ static int open_dice_mmap(struct file *filp, struct vm_area_struct *vma)
 
 	/* Ensure userspace cannot acquire VM_WRITE + VM_SHARED later. */
 	if (vma->vm_flags & VM_WRITE)
-		vma->vm_flags &= ~VM_MAYSHARE;
+		vm_flags_clear(vma, VM_MAYSHARE);
 	else if (vma->vm_flags & VM_SHARED)
-		vma->vm_flags &= ~VM_MAYWRITE;
+		vm_flags_clear(vma, VM_MAYWRITE);
 
 	/* Create write-combine mapping so all clients observe a wipe. */
 	vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
-	vma->vm_flags |= VM_DONTCOPY | VM_DONTDUMP;
+	vm_flags_set(vma, VM_DONTCOPY | VM_DONTDUMP);
 	return vm_iomap_memory(vma, drvdata->rmem->base, drvdata->rmem->size);
 }
 
@@ -142,7 +142,6 @@ static int __init open_dice_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	*drvdata = (struct open_dice_drvdata){
-		.lock = __MUTEX_INITIALIZER(drvdata->lock),
 		.rmem = rmem,
 		.misc = (struct miscdevice){
 			.parent	= dev,
@@ -152,6 +151,7 @@ static int __init open_dice_probe(struct platform_device *pdev)
 			.mode	= 0600,
 		},
 	};
+	mutex_init(&drvdata->lock);
 
 	/* Index overflow check not needed, misc_register() will fail. */
 	snprintf(drvdata->name, sizeof(drvdata->name), DRIVER_NAME"%u", dev_idx++);

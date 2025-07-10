@@ -11,12 +11,9 @@
  * mechanism for vendor modules to hook and extend functionality
  */
 struct task_struct;
-
 DECLARE_HOOK(android_vh_mpam_set,
 	TP_PROTO(struct task_struct *prev, struct task_struct *next),
 	TP_ARGS(prev, next));
-
-/* macro versions of hooks are no longer required */
 
 #endif /* _TRACE_HOOK_MPAM_H */
 /* This part must be outside protection */

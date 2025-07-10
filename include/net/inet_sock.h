@@ -17,6 +17,7 @@
 #include <linux/types.h>
 #include <linux/jhash.h>
 #include <linux/netdevice.h>
+#include <linux/android_kabi.h>
 
 #include <net/flow.h>
 #include <net/sock.h>
@@ -107,11 +108,12 @@ static inline struct inet_request_sock *inet_rsk(const struct request_sock *sk)
 
 static inline u32 inet_request_mark(const struct sock *sk, struct sk_buff *skb)
 {
-	if (!sk->sk_mark &&
-	    READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_fwmark_accept))
+	u32 mark = READ_ONCE(sk->sk_mark);
+
+	if (!mark && READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_fwmark_accept))
 		return skb->mark;
 
-	return sk->sk_mark;
+	return mark;
 }
 
 static inline int inet_request_bound_dev_if(const struct sock *sk,
@@ -220,11 +222,10 @@ struct inet_sock {
 	__be32			inet_saddr;
 	__s16			uc_ttl;
 	__u16			cmsg_flags;
+	struct ip_options_rcu __rcu	*inet_opt;
 	__be16			inet_sport;
 	__u16			inet_id;
 
-	struct ip_options_rcu __rcu	*inet_opt;
-	int			rx_dst_ifindex;
 	__u8			tos;
 	__u8			min_ttl;
 	__u8			mc_ttl;
@@ -250,6 +251,13 @@ struct inet_sock {
 	__be32			mc_addr;
 	struct ip_mc_socklist __rcu	*mc_list;
 	struct inet_cork_full	cork;
+	struct {
+		__u16 lo;
+		__u16 hi;
+	}			local_port_range;
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
 };
 
 #define IPCORK_OPT	1	/* ip-options has been held in ipcork.opt */
@@ -384,6 +392,18 @@ static inline bool inet_can_nonlocal_bind(struct net *net,
 {
 	return READ_ONCE(net->ipv4.sysctl_ip_nonlocal_bind) ||
 		inet->freebind || inet->transparent;
+}
+
+static inline bool inet_addr_valid_or_nonlocal(struct net *net,
+					       struct inet_sock *inet,
+					       __be32 addr,
+					       int addr_type)
+{
+	return inet_can_nonlocal_bind(net, inet) ||
+		addr == htonl(INADDR_ANY) ||
+		addr_type == RTN_LOCAL ||
+		addr_type == RTN_MULTICAST ||
+		addr_type == RTN_BROADCAST;
 }
 
 #endif	/* _INET_SOCK_H */

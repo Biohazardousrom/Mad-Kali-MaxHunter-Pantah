@@ -1,15 +1,5 @@
-/*
- * Copyright (C) 2014 Broadcom Corporation
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation version 2.
- *
- * This program is distributed "as is" WITHOUT ANY WARRANTY of any
- * kind, whether express or implied; without even the implied warranty
- * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- */
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2014 Broadcom Corporation
 
 /*
  * iProc SDHCI platform driver
@@ -304,11 +294,35 @@ static const struct sdhci_iproc_data bcm2711_data = {
 	.mmc_caps = MMC_CAP_3_3V_DDR,
 };
 
+static const struct sdhci_pltfm_data sdhci_bcm7211a0_pltfm_data = {
+	.quirks = SDHCI_QUIRK_MISSING_CAPS |
+		SDHCI_QUIRK_BROKEN_TIMEOUT_VAL |
+		SDHCI_QUIRK_BROKEN_DMA |
+		SDHCI_QUIRK_BROKEN_ADMA,
+	.ops = &sdhci_iproc_ops,
+};
+
+#define BCM7211A0_BASE_CLK_MHZ 100
+static const struct sdhci_iproc_data bcm7211a0_data = {
+	.pdata = &sdhci_bcm7211a0_pltfm_data,
+	.caps = ((BCM7211A0_BASE_CLK_MHZ / 2) << SDHCI_TIMEOUT_CLK_SHIFT) |
+		(BCM7211A0_BASE_CLK_MHZ << SDHCI_CLOCK_BASE_SHIFT) |
+		((0x2 << SDHCI_MAX_BLOCK_SHIFT)
+			& SDHCI_MAX_BLOCK_MASK) |
+		SDHCI_CAN_VDD_330 |
+		SDHCI_CAN_VDD_180 |
+		SDHCI_CAN_DO_SUSPEND |
+		SDHCI_CAN_DO_HISPD,
+	.caps1 = SDHCI_DRIVER_TYPE_C |
+		 SDHCI_DRIVER_TYPE_D,
+};
+
 static const struct of_device_id sdhci_iproc_of_match[] = {
 	{ .compatible = "brcm,bcm2835-sdhci", .data = &bcm2835_data },
 	{ .compatible = "brcm,bcm2711-emmc2", .data = &bcm2711_data },
 	{ .compatible = "brcm,sdhci-iproc-cygnus", .data = &iproc_cygnus_data},
 	{ .compatible = "brcm,sdhci-iproc", .data = &iproc_data },
+	{ .compatible = "brcm,bcm7211a0-sdhci", .data = &bcm7211a0_data },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, sdhci_iproc_of_match);
@@ -402,6 +416,11 @@ err:
 	return ret;
 }
 
+static void sdhci_iproc_shutdown(struct platform_device *pdev)
+{
+	sdhci_pltfm_suspend(&pdev->dev);
+}
+
 static struct platform_driver sdhci_iproc_driver = {
 	.driver = {
 		.name = "sdhci-iproc",
@@ -412,6 +431,7 @@ static struct platform_driver sdhci_iproc_driver = {
 	},
 	.probe = sdhci_iproc_probe,
 	.remove = sdhci_pltfm_unregister,
+	.shutdown = sdhci_iproc_shutdown,
 };
 module_platform_driver(sdhci_iproc_driver);
 

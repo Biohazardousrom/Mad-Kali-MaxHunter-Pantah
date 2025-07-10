@@ -724,6 +724,9 @@ int install_elf_bpf(const char *file, const char *section, int *fd,
 	Elf_Data *data_prog = NULL, *data_maps = NULL, *data_symbols = NULL;
 	int maps_index, symbol_index, prog_index;
 	int i;
+	int bpf_prog_type_fuse_fd = -1;
+	char buffer[10] = {0};
+	int bpf_prog_type_fuse;
 
 	TESTNE(readlink("/proc/self/exe", path, PATH_MAX), -1);
 	TEST(last_slash = strrchr(path, '/'), last_slash);
@@ -781,8 +784,15 @@ int install_elf_bpf(const char *file, const char *section, int *fd,
 			  0);
 	}
 
+	TEST(bpf_prog_type_fuse_fd = open("/sys/fs/fuse/bpf_prog_type_fuse",
+					  O_RDONLY | O_CLOEXEC),
+	     bpf_prog_type_fuse_fd != -1);
+	TESTGE(read(bpf_prog_type_fuse_fd, buffer, sizeof(buffer)), 1);
+	TEST(bpf_prog_type_fuse = strtol(buffer, NULL, 10),
+	     bpf_prog_type_fuse != 0);
+
 	bpf_attr = (union bpf_attr) {
-		.prog_type = BPF_PROG_TYPE_FUSE,
+		.prog_type = bpf_prog_type_fuse,
 		.insn_cnt = data_prog->d_size / 8,
 		.insns = ptr_to_u64(data_prog->d_buf),
 		.license = ptr_to_u64("GPL"),
@@ -800,6 +810,7 @@ int install_elf_bpf(const char *file, const char *section, int *fd,
 	result = TEST_SUCCESS;
 out:
 	close(filter_fd);
+	close(bpf_prog_type_fuse_fd);
 	return result;
 }
 

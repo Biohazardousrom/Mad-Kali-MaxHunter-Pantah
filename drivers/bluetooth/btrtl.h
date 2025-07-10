@@ -14,6 +14,11 @@
 
 struct btrtl_device_info;
 
+struct rtl_chip_type_evt {
+	__u8 status;
+	__u8 type;
+} __packed;
+
 struct rtl_download_cmd {
 	__u8 index;
 	__u8 data[RTL_FRAG_LEN];
@@ -54,6 +59,8 @@ struct btrtl_device_info *btrtl_initialize(struct hci_dev *hdev,
 void btrtl_free(struct btrtl_device_info *btrtl_dev);
 int btrtl_download_firmware(struct hci_dev *hdev,
 			    struct btrtl_device_info *btrtl_dev);
+void btrtl_set_quirks(struct hci_dev *hdev,
+		      struct btrtl_device_info *btrtl_dev);
 int btrtl_setup_realtek(struct hci_dev *hdev);
 int btrtl_shutdown_realtek(struct hci_dev *hdev);
 int btrtl_get_uart_settings(struct hci_dev *hdev,
@@ -77,6 +84,11 @@ static inline int btrtl_download_firmware(struct hci_dev *hdev,
 					  struct btrtl_device_info *btrtl_dev)
 {
 	return -EOPNOTSUPP;
+}
+
+static inline void btrtl_set_quirks(struct hci_dev *hdev,
+				    struct btrtl_device_info *btrtl_dev)
+{
 }
 
 static inline int btrtl_setup_realtek(struct hci_dev *hdev)

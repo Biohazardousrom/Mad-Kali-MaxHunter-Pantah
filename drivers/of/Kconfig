@@ -70,14 +70,8 @@ config OF_IRQ
 	def_bool y
 	depends on !SPARC && IRQ_DOMAIN
 
-config OF_NET
-	depends on NETDEVICES
-	def_bool y
-
 config OF_RESERVED_MEM
-	bool
-	depends on OF_EARLY_FLATTREE
-	default y if DMA_DECLARE_COHERENT || DMA_CMA
+	def_bool OF_EARLY_FLATTREE
 
 config OF_RESOLVE
 	bool
@@ -99,14 +93,5 @@ config OF_NUMA
 config OF_DMA_DEFAULT_COHERENT
 	# arches should select this if DMA is coherent by default for OF devices
 	bool
-
-config OF_GENERATE_SYMBOLS
-	bool "Enable symbol generation in DTC"
-	depends on DTC
-	help
-	  Enable generation of symbols when compiling device tree source into
-	  device tree blobs. Enabling this option will add --symbols to DTC
-	  command line. This is necessary to apply device tree overlays in the
-	  bootloader.
 
 endif # OF

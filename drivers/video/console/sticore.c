@@ -290,7 +290,7 @@ static char default_sti_path[21] __read_mostly;
 static int __init sti_setup(char *str)
 {
 	if (str)
-		strlcpy (default_sti_path, str, sizeof (default_sti_path));
+		strscpy(default_sti_path, str, sizeof(default_sti_path));
 	
 	return 1;
 }
@@ -507,7 +507,7 @@ sti_select_fbfont(struct sti_cooked_rom *cooked_rom, const char *fbfont_name)
 			fbfont->width, fbfont->height, fbfont->name);
 			
 	bpc = ((fbfont->width+7)/8) * fbfont->height; 
-	size = bpc * 256;
+	size = bpc * fbfont->charcount;
 	size += sizeof(struct sti_rom_font);
 
 	nf = kzalloc(size, STI_LOWMEM);
@@ -515,7 +515,7 @@ sti_select_fbfont(struct sti_cooked_rom *cooked_rom, const char *fbfont_name)
 		return NULL;
 
 	nf->first_char = 0;
-	nf->last_char = 255;
+	nf->last_char = fbfont->charcount - 1;
 	nf->width = fbfont->width;
 	nf->height = fbfont->height;
 	nf->font_type = STI_FONT_HPROMAN8;
@@ -526,7 +526,7 @@ sti_select_fbfont(struct sti_cooked_rom *cooked_rom, const char *fbfont_name)
 
 	dest = nf;
 	dest += sizeof(struct sti_rom_font);
-	memcpy(dest, fbfont->data, bpc*256);
+	memcpy(dest, fbfont->data, bpc * fbfont->charcount);
 
 	cooked_font = kzalloc(sizeof(*cooked_font), GFP_KERNEL);
 	if (!cooked_font) {
@@ -549,6 +549,26 @@ sti_select_fbfont(struct sti_cooked_rom *cooked_rom, const char *fbfont_name)
 	return NULL;
 }
 #endif
+
+static void sti_dump_font(struct sti_cooked_font *font)
+{
+#ifdef STI_DUMP_FONT
+	unsigned char *p = (unsigned char *)font->raw;
+	int n;
+
+	p += sizeof(struct sti_rom_font);
+	pr_debug("  w %d h %d bpc %d\n", font->width, font->height,
+					font->raw->bytes_per_char);
+
+	for (n = 0; n < 256 * font->raw->bytes_per_char; n += 16, p += 16) {
+		pr_debug("        0x%02x, 0x%02x, 0x%02x, 0x%02x, 0x%02x, 0x%02x,"
+			" 0x%02x, 0x%02x, 0x%02x, 0x%02x, 0x%02x, 0x%02x,"
+			" 0x%02x, 0x%02x, 0x%02x, 0x%02x,\n",
+			p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8],
+			p[9], p[10], p[11], p[12], p[13], p[14], p[15]);
+	}
+#endif
+}
 
 static int sti_search_font(struct sti_cooked_rom *rom, int height, int width)
 {
@@ -661,7 +681,7 @@ static int sti_cook_fonts(struct sti_cooked_rom *cooked_rom,
 void sti_font_convert_bytemode(struct sti_struct *sti, struct sti_cooked_font *f)
 {
 	unsigned char *n, *p, *q;
-	int size = f->raw->bytes_per_char * 256 + sizeof(struct sti_rom_font);
+	int size = f->raw->bytes_per_char * (f->raw->last_char + 1) + sizeof(struct sti_rom_font);
 	struct sti_rom_font *old_font;
 
 	if (sti->wordmode)
@@ -797,6 +817,7 @@ static int sti_read_rom(int wordmode, struct sti_struct *sti,
 	sti->font->width = sti->font->raw->width;
 	sti->font->height = sti->font->raw->height;
 	sti_font_convert_bytemode(sti, sti->font);
+	sti_dump_font(sti->font);
 
 	sti->sti_mem_request = raw->sti_mem_req;
 	sti->graphics_id[0] = raw->graphics_id[0];

@@ -9,12 +9,12 @@
 
 #include <trace/hooks/vendor_hooks.h>
 
-DECLARE_HOOK(android_vh_check_uninterruptible_tasks,
+DECLARE_HOOK(android_vh_check_uninterrupt_tasks,
 	TP_PROTO(struct task_struct *t, unsigned long timeout,
 		bool *need_check),
 	TP_ARGS(t, timeout, need_check));
 
-DECLARE_HOOK(android_vh_check_uninterruptible_tasks_dn,
+DECLARE_HOOK(android_vh_check_uninterrupt_tasks_done,
 	TP_PROTO(void *unused),
 	TP_ARGS(unused));
 

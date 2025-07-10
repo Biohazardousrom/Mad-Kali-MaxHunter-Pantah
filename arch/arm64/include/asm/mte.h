@@ -11,7 +11,9 @@
 #ifndef __ASSEMBLY__
 
 #include <linux/bitfield.h>
+#include <linux/kasan-enabled.h>
 #include <linux/page-flags.h>
+#include <linux/sched.h>
 #include <linux/types.h>
 
 #include <asm/pgtable-types.h>
@@ -23,7 +25,7 @@ unsigned long mte_copy_tags_to_user(void __user *to, void *from,
 				    unsigned long n);
 int mte_save_tags(struct page *page);
 void mte_save_page_tags(const void *page_addr, void *tag_storage);
-bool mte_restore_tags(swp_entry_t entry, struct page *page);
+void mte_restore_tags(swp_entry_t entry, struct page *page);
 void mte_restore_page_tags(void *page_addr, const void *tag_storage);
 void mte_invalidate_tags(int type, pgoff_t offset);
 void mte_invalidate_tags_area(int type);
@@ -35,8 +37,31 @@ void mte_free_tag_storage(char *storage);
 /* track which pages have valid allocation tags */
 #define PG_mte_tagged	PG_arch_2
 
+static inline void set_page_mte_tagged(struct page *page)
+{
+	/*
+	 * Ensure that the tags written prior to this function are visible
+	 * before the page flags update.
+	 */
+	smp_wmb();
+	set_bit(PG_mte_tagged, &page->flags);
+}
+
+static inline bool page_mte_tagged(struct page *page)
+{
+	bool ret = test_bit(PG_mte_tagged, &page->flags);
+
+	/*
+	 * If the page is tagged, ensure ordering with a likely subsequent
+	 * read of the tags.
+	 */
+	if (ret)
+		smp_rmb();
+	return ret;
+}
+
 void mte_zero_clear_page_tags(void *addr);
-void mte_sync_tags(pte_t old_pte, pte_t pte);
+void mte_sync_tags(pte_t pte);
 void mte_copy_page_tags(void *kto, const void *kfrom);
 void mte_thread_init_user(void);
 void mte_thread_switch(struct task_struct *next);
@@ -47,16 +72,24 @@ long set_mte_ctrl(struct task_struct *task, unsigned long arg);
 long get_mte_ctrl(struct task_struct *task);
 int mte_ptrace_copy_tags(struct task_struct *child, long request,
 			 unsigned long addr, unsigned long data);
+size_t mte_probe_user_range(const char __user *uaddr, size_t size);
 
 #else /* CONFIG_ARM64_MTE */
 
 /* unused if !CONFIG_ARM64_MTE, silence the compiler */
 #define PG_mte_tagged	0
 
+static inline void set_page_mte_tagged(struct page *page)
+{
+}
+static inline bool page_mte_tagged(struct page *page)
+{
+	return false;
+}
 static inline void mte_zero_clear_page_tags(void *addr)
 {
 }
-static inline void mte_sync_tags(pte_t old_pte, pte_t pte)
+static inline void mte_sync_tags(pte_t pte)
 {
 }
 static inline void mte_copy_page_tags(void *kto, const void *kfrom)
@@ -91,20 +124,32 @@ static inline int mte_ptrace_copy_tags(struct task_struct *child,
 
 #endif /* CONFIG_ARM64_MTE */
 
-#ifdef CONFIG_KASAN_HW_TAGS
-/* Whether the MTE asynchronous mode is enabled. */
-DECLARE_STATIC_KEY_FALSE(mte_async_or_asymm_mode);
-
-static inline bool system_uses_mte_async_or_asymm_mode(void)
+static inline void mte_disable_tco_entry(struct task_struct *task)
 {
-	return static_branch_unlikely(&mte_async_or_asymm_mode);
+	if (!system_supports_mte())
+		return;
+
+	/*
+	 * Re-enable tag checking (TCO set on exception entry). This is only
+	 * necessary if MTE is enabled in either the kernel or the userspace
+	 * task in synchronous or asymmetric mode (SCTLR_EL1.TCF0 bit 0 is set
+	 * for both). With MTE disabled in the kernel and disabled or
+	 * asynchronous in userspace, tag check faults (including in uaccesses)
+	 * are not reported, therefore there is no need to re-enable checking.
+	 * This is beneficial on microarchitectures where re-enabling TCO is
+	 * expensive.
+	 */
+	if (kasan_hw_tags_enabled() ||
+	    (task->thread.sctlr_user & (1UL << SCTLR_EL1_TCF0_SHIFT)))
+		asm volatile(SET_PSTATE_TCO(0));
 }
 
+#ifdef CONFIG_KASAN_HW_TAGS
 void mte_check_tfsr_el1(void);
 
 static inline void mte_check_tfsr_entry(void)
 {
-	if (!system_supports_mte())
+	if (!kasan_hw_tags_enabled())
 		return;
 
 	mte_check_tfsr_el1();
@@ -112,7 +157,7 @@ static inline void mte_check_tfsr_entry(void)
 
 static inline void mte_check_tfsr_exit(void)
 {
-	if (!system_supports_mte())
+	if (!kasan_hw_tags_enabled())
 		return;
 
 	/*
@@ -126,10 +171,6 @@ static inline void mte_check_tfsr_exit(void)
 	mte_check_tfsr_el1();
 }
 #else
-static inline bool system_uses_mte_async_or_asymm_mode(void)
-{
-	return false;
-}
 static inline void mte_check_tfsr_el1(void)
 {
 }

@@ -22,6 +22,7 @@
 #include <linux/regmap.h>
 #include <linux/mfd/syscon.h>
 #include <linux/slab.h>
+#include <trace/hooks/regmap.h>
 
 static struct platform_driver syscon_driver;
 
@@ -60,7 +61,7 @@ static struct syscon *of_syscon_register(struct device_node *np, bool check_clk)
 		goto err_map;
 	}
 
-	base = ioremap(res.start, resource_size(&res));
+	base = of_iomap(np, 0);
 	if (!base) {
 		ret = -ENOMEM;
 		goto err_map;
@@ -101,8 +102,7 @@ static struct syscon *of_syscon_register(struct device_node *np, bool check_clk)
 		}
 	}
 
-	syscon_config.name = kasprintf(GFP_KERNEL, "%pOFn@%llx", np,
-				       (u64)res.start);
+	syscon_config.name = kasprintf(GFP_KERNEL, "%pOFn@%pa", np, &res.start);
 	if (!syscon_config.name) {
 		ret = -ENOMEM;
 		goto err_regmap;
@@ -133,6 +133,7 @@ static struct syscon *of_syscon_register(struct device_node *np, bool check_clk)
 		}
 	}
 
+	trace_android_vh_regmap_update(&syscon_config, regmap);
 	syscon->regmap = regmap;
 	syscon->np = np;
 
@@ -260,6 +261,24 @@ struct regmap *syscon_regmap_lookup_by_phandle_args(struct device_node *np,
 	return regmap;
 }
 EXPORT_SYMBOL_GPL(syscon_regmap_lookup_by_phandle_args);
+
+/*
+ * It behaves the same as syscon_regmap_lookup_by_phandle() except where
+ * there is no regmap phandle. In this case, instead of returning -ENODEV,
+ * the function returns NULL.
+ */
+struct regmap *syscon_regmap_lookup_by_phandle_optional(struct device_node *np,
+					const char *property)
+{
+	struct regmap *regmap;
+
+	regmap = syscon_regmap_lookup_by_phandle(np, property);
+	if (IS_ERR(regmap) && PTR_ERR(regmap) == -ENODEV)
+		return NULL;
+
+	return regmap;
+}
+EXPORT_SYMBOL_GPL(syscon_regmap_lookup_by_phandle_optional);
 
 static int syscon_probe(struct platform_device *pdev)
 {

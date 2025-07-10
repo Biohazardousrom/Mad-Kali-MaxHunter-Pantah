@@ -47,7 +47,6 @@ struct {
 };
 #endif
 
-int _version SEC("version") = 1;
 char _license[] SEC("license") = "GPL";
 
 /* Fill 'tuple' with L3 info, and attempt to find L4. On fail, return NULL. */
@@ -101,7 +100,6 @@ get_tuple(struct __sk_buff *skb, bool *ipv4, bool *tcp)
 static inline int
 handle_udp(struct __sk_buff *skb, struct bpf_sock_tuple *tuple, bool ipv4)
 {
-	struct bpf_sock_tuple ln = {0};
 	struct bpf_sock *sk;
 	const int zero = 0;
 	size_t tuple_len;
@@ -133,7 +131,6 @@ assign:
 static inline int
 handle_tcp(struct __sk_buff *skb, struct bpf_sock_tuple *tuple, bool ipv4)
 {
-	struct bpf_sock_tuple ln = {0};
 	struct bpf_sock *sk;
 	const int zero = 0;
 	size_t tuple_len;
@@ -170,10 +167,10 @@ assign:
 	return ret;
 }
 
-SEC("classifier/sk_assign_test")
+SEC("tc")
 int bpf_sk_assign_test(struct __sk_buff *skb)
 {
-	struct bpf_sock_tuple *tuple, ln = {0};
+	struct bpf_sock_tuple *tuple;
 	bool ipv4 = false;
 	bool tcp = false;
 	int tuple_len;

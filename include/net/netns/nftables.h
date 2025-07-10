@@ -7,7 +7,6 @@
 
 struct netns_nftables {
 	u8			gencursor;
-
 	ANDROID_KABI_RESERVE(1);
 };
 

@@ -1762,12 +1762,32 @@ void ath10k_wmi_put_wmi_channel(struct ath10k *ar, struct wmi_channel *ch,
 
 int ath10k_wmi_wait_for_service_ready(struct ath10k *ar)
 {
-	unsigned long time_left;
+	unsigned long time_left, i;
 
 	time_left = wait_for_completion_timeout(&ar->wmi.service_ready,
 						WMI_SERVICE_READY_TIMEOUT_HZ);
-	if (!time_left)
-		return -ETIMEDOUT;
+	if (!time_left) {
+		/* Sometimes the PCI HIF doesn't receive interrupt
+		 * for the service ready message even if the buffer
+		 * was completed. PCIe sniffer shows that it's
+		 * because the corresponding CE ring doesn't fires
+		 * it. Workaround here by polling CE rings once.
+		 */
+		ath10k_warn(ar, "failed to receive service ready completion, polling..\n");
+
+		for (i = 0; i < CE_COUNT; i++)
+			ath10k_hif_send_complete_check(ar, i, 1);
+
+		time_left = wait_for_completion_timeout(&ar->wmi.service_ready,
+							WMI_SERVICE_READY_TIMEOUT_HZ);
+		if (!time_left) {
+			ath10k_warn(ar, "polling timed out\n");
+			return -ETIMEDOUT;
+		}
+
+		ath10k_warn(ar, "service ready completion received, continuing normally\n");
+	}
+
 	return 0;
 }
 
@@ -1894,7 +1914,7 @@ static void ath10k_wmi_tx_beacons_iter(void *data, u8 *mac,
 static void ath10k_wmi_tx_beacons_nowait(struct ath10k *ar)
 {
 	ieee80211_iterate_active_interfaces_atomic(ar->hw,
-						   IEEE80211_IFACE_ITER_NORMAL,
+						   ATH10K_ITER_NORMAL_FLAGS,
 						   ath10k_wmi_tx_beacons_iter,
 						   NULL);
 }
@@ -1937,7 +1957,7 @@ int ath10k_wmi_cmd_send(struct ath10k *ar, struct sk_buff *skb, u32 cmd_id)
 	if (ret == -EAGAIN) {
 		ath10k_warn(ar, "wmi command %d timeout, restarting hardware\n",
 			    cmd_id);
-		queue_work(ar->workqueue, &ar->restart_work);
+		ath10k_core_start_recovery(ar);
 	}
 
 	return ret;
@@ -2427,7 +2447,7 @@ wmi_process_mgmt_tx_comp(struct ath10k *ar, struct mgmt_tx_compl_params *param)
 		info->flags |= IEEE80211_TX_STAT_ACK;
 		info->status.ack_signal = ATH10K_DEFAULT_NOISE_FLOOR +
 					  param->ack_rssi;
-		info->status.is_valid_ack_signal = true;
+		info->status.flags |= IEEE80211_TX_STATUS_ACK_SIGNAL_VALID;
 	}
 
 	ieee80211_tx_status_irqsafe(ar->hw, msdu);
@@ -2799,7 +2819,7 @@ void ath10k_wmi_event_chan_info(struct ath10k *ar, struct sk_buff *skb)
 	switch (ar->scan.state) {
 	case ATH10K_SCAN_IDLE:
 	case ATH10K_SCAN_STARTING:
-		ath10k_warn(ar, "received chan info event without a scan request, ignoring\n");
+		ath10k_dbg(ar, ATH10K_DBG_WMI, "received chan info event without a scan request, ignoring\n");
 		goto exit;
 	case ATH10K_SCAN_RUNNING:
 	case ATH10K_SCAN_ABORTING:
@@ -2871,7 +2891,7 @@ void ath10k_wmi_pull_pdev_stats_tx(const struct wmi_pdev_stats_tx *src,
 	dst->hw_reaped = __le32_to_cpu(src->hw_reaped);
 	dst->underrun = __le32_to_cpu(src->underrun);
 	dst->tx_abort = __le32_to_cpu(src->tx_abort);
-	dst->mpdus_requed = __le32_to_cpu(src->mpdus_requed);
+	dst->mpdus_requeued = __le32_to_cpu(src->mpdus_requeued);
 	dst->tx_ko = __le32_to_cpu(src->tx_ko);
 	dst->data_rc = __le32_to_cpu(src->data_rc);
 	dst->self_triggers = __le32_to_cpu(src->self_triggers);
@@ -2899,7 +2919,7 @@ ath10k_wmi_10_4_pull_pdev_stats_tx(const struct wmi_10_4_pdev_stats_tx *src,
 	dst->hw_reaped = __le32_to_cpu(src->hw_reaped);
 	dst->underrun = __le32_to_cpu(src->underrun);
 	dst->tx_abort = __le32_to_cpu(src->tx_abort);
-	dst->mpdus_requed = __le32_to_cpu(src->mpdus_requed);
+	dst->mpdus_requeued = __le32_to_cpu(src->mpdus_requeued);
 	dst->tx_ko = __le32_to_cpu(src->tx_ko);
 	dst->data_rc = __le32_to_cpu(src->data_rc);
 	dst->self_triggers = __le32_to_cpu(src->self_triggers);
@@ -3501,7 +3521,7 @@ void ath10k_wmi_event_peer_sta_kickout(struct ath10k *ar, struct sk_buff *skb)
 		return;
 	}
 
-	ath10k_dbg(ar, ATH10K_DBG_WMI, "wmi event peer sta kickout %pM\n",
+	ath10k_dbg(ar, ATH10K_DBG_STA, "wmi event peer sta kickout %pM\n",
 		   arg.mac_addr);
 
 	rcu_read_lock();
@@ -3555,7 +3575,7 @@ static void ath10k_wmi_update_tim(struct ath10k *ar,
 	__le32 t;
 	u32 v, tim_len;
 
-	/* When FW reports 0 in tim_len, ensure atleast first byte
+	/* When FW reports 0 in tim_len, ensure at least first byte
 	 * in tim_bitmap is considered for pvm calculation.
 	 */
 	tim_len = tim_info->tim_len ? __le32_to_cpu(tim_info->tim_len) : 1;
@@ -3882,13 +3902,13 @@ void ath10k_wmi_event_host_swba(struct ath10k *ar, struct sk_buff *skb)
 		 * Once CSA counter is completed stop sending beacons until
 		 * actual channel switch is done
 		 */
-		if (arvif->vif->csa_active &&
+		if (arvif->vif->bss_conf.csa_active &&
 		    ieee80211_beacon_cntdwn_is_complete(arvif->vif)) {
 			ieee80211_csa_finish(arvif->vif);
 			continue;
 		}
 
-		bcn = ieee80211_beacon_get(ar->hw, arvif->vif);
+		bcn = ieee80211_beacon_get(ar->hw, arvif->vif, 0);
 		if (!bcn) {
 			ath10k_warn(ar, "could not get mac80211 beacon\n");
 			continue;
@@ -7510,7 +7530,7 @@ ath10k_wmi_op_gen_set_sta_ps(struct ath10k *ar, u32 vdev_id,
 	cmd->param_id    = __cpu_to_le32(param_id);
 	cmd->param_value = __cpu_to_le32(value);
 
-	ath10k_dbg(ar, ATH10K_DBG_WMI,
+	ath10k_dbg(ar, ATH10K_DBG_STA,
 		   "wmi sta ps param vdev_id 0x%x param %d value %d\n",
 		   vdev_id, param_id, value);
 	return skb;
@@ -8274,7 +8294,7 @@ ath10k_wmi_fw_pdev_tx_stats_fill(const struct ath10k_fw_stats_pdev *pdev,
 	len += scnprintf(buf + len, buf_len - len, "%30s %10d\n",
 			 "PPDUs cleaned", pdev->tx_abort);
 	len += scnprintf(buf + len, buf_len - len, "%30s %10d\n",
-			 "MPDUs requed", pdev->mpdus_requed);
+			 "MPDUs requeued", pdev->mpdus_requeued);
 	len += scnprintf(buf + len, buf_len - len, "%30s %10d\n",
 			 "Excessive retries", pdev->tx_ko);
 	len += scnprintf(buf + len, buf_len - len, "%30s %10d\n",
@@ -9555,7 +9575,7 @@ static int ath10k_wmi_mgmt_tx_clean_up_pending(int msdu_id, void *ptr,
 	struct sk_buff *msdu;
 
 	ath10k_dbg(ar, ATH10K_DBG_WMI,
-		   "force cleanup mgmt msdu_id %hu\n", msdu_id);
+		   "force cleanup mgmt msdu_id %u\n", msdu_id);
 
 	msdu = pkt_addr->vaddr;
 	dma_unmap_single(ar->dev, pkt_addr->paddr,

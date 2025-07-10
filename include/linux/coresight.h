@@ -10,6 +10,7 @@
 #include <linux/io.h>
 #include <linux/perf_event.h>
 #include <linux/sched.h>
+#include <linux/android_kabi.h>
 
 /* Peripheral id registers (0xFD0-0xFEC) */
 #define CORESIGHT_PERIPHIDR4	0xfd0
@@ -36,7 +37,6 @@
 extern struct bus_type coresight_bustype;
 
 enum coresight_dev_type {
-	CORESIGHT_DEV_TYPE_NONE,
 	CORESIGHT_DEV_TYPE_SINK,
 	CORESIGHT_DEV_TYPE_LINK,
 	CORESIGHT_DEV_TYPE_LINKSINK,
@@ -46,7 +46,6 @@ enum coresight_dev_type {
 };
 
 enum coresight_dev_subtype_sink {
-	CORESIGHT_DEV_SUBTYPE_SINK_NONE,
 	CORESIGHT_DEV_SUBTYPE_SINK_PORT,
 	CORESIGHT_DEV_SUBTYPE_SINK_BUFFER,
 	CORESIGHT_DEV_SUBTYPE_SINK_SYSMEM,
@@ -54,21 +53,18 @@ enum coresight_dev_subtype_sink {
 };
 
 enum coresight_dev_subtype_link {
-	CORESIGHT_DEV_SUBTYPE_LINK_NONE,
 	CORESIGHT_DEV_SUBTYPE_LINK_MERG,
 	CORESIGHT_DEV_SUBTYPE_LINK_SPLIT,
 	CORESIGHT_DEV_SUBTYPE_LINK_FIFO,
 };
 
 enum coresight_dev_subtype_source {
-	CORESIGHT_DEV_SUBTYPE_SOURCE_NONE,
 	CORESIGHT_DEV_SUBTYPE_SOURCE_PROC,
 	CORESIGHT_DEV_SUBTYPE_SOURCE_BUS,
 	CORESIGHT_DEV_SUBTYPE_SOURCE_SOFTWARE,
 };
 
 enum coresight_dev_subtype_helper {
-	CORESIGHT_DEV_SUBTYPE_HELPER_NONE,
 	CORESIGHT_DEV_SUBTYPE_HELPER_CATU,
 };
 
@@ -164,6 +160,7 @@ struct coresight_desc {
 	const struct attribute_group **groups;
 	const char *name;
 	struct csdev_access access;
+	ANDROID_KABI_RESERVE(1);
 };
 
 /**
@@ -181,6 +178,7 @@ struct coresight_connection {
 	struct fwnode_handle *child_fwnode;
 	struct coresight_device *child_dev;
 	struct coresight_sysfs_link *link;
+	ANDROID_KABI_RESERVE(1);
 };
 
 /**
@@ -220,6 +218,10 @@ struct coresight_sysfs_link {
  * @nr_links:   number of sysfs links created to other components from this
  *		device. These will appear in the "connections" group.
  * @has_conns_grp: Have added a "connections" group for sysfs links.
+ * @feature_csdev_list: List of complex feature programming added to the device.
+ * @config_csdev_list:  List of system configurations added to the device.
+ * @cscfg_csdev_lock:	Protect the lists of configurations and features.
+ * @active_cscfg_ctxt:  Context information for current active system configuration.
  */
 struct coresight_device {
 	struct coresight_platform_data *pdata;
@@ -241,6 +243,13 @@ struct coresight_device {
 	int nr_links;
 	bool has_conns_grp;
 	bool ect_enabled; /* true only if associated ect device is enabled */
+	/* system configuration and feature lists */
+	struct list_head feature_csdev_list;
+	struct list_head config_csdev_list;
+	spinlock_t cscfg_csdev_lock;
+	void *active_cscfg_ctxt;
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
 };
 
 /*
@@ -292,6 +301,7 @@ struct coresight_ops_sink {
 	unsigned long (*update_buffer)(struct coresight_device *csdev,
 			      struct perf_output_handle *handle,
 			      void *sink_config);
+	ANDROID_KABI_RESERVE(1);
 };
 
 /**
@@ -322,6 +332,7 @@ struct coresight_ops_source {
 		      struct perf_event *event,  u32 mode);
 	void (*disable)(struct coresight_device *csdev,
 			struct perf_event *event);
+	ANDROID_KABI_RESERVE(1);
 };
 
 /**
@@ -355,6 +366,7 @@ struct coresight_ops {
 	const struct coresight_ops_source *source_ops;
 	const struct coresight_ops_helper *helper_ops;
 	const struct coresight_ops_ect *ect_ops;
+	ANDROID_KABI_RESERVE(1);
 };
 
 #if IS_ENABLED(CONFIG_CORESIGHT)
@@ -366,6 +378,29 @@ static inline u32 csdev_access_relaxed_read32(struct csdev_access *csa,
 		return readl_relaxed(csa->base + offset);
 
 	return csa->read(offset, true, false);
+}
+
+static inline u64 csdev_access_relaxed_read_pair(struct csdev_access *csa,
+						 u32 lo_offset, u32 hi_offset)
+{
+	if (likely(csa->io_mem)) {
+		return readl_relaxed(csa->base + lo_offset) |
+			((u64)readl_relaxed(csa->base + hi_offset) << 32);
+	}
+
+	return csa->read(lo_offset, true, false) | (csa->read(hi_offset, true, false) << 32);
+}
+
+static inline void csdev_access_relaxed_write_pair(struct csdev_access *csa, u64 val,
+						   u32 lo_offset, u32 hi_offset)
+{
+	if (likely(csa->io_mem)) {
+		writel_relaxed((u32)val, csa->base + lo_offset);
+		writel_relaxed((u32)(val >> 32), csa->base + hi_offset);
+	} else {
+		csa->write((u32)val, lo_offset, true, false);
+		csa->write((u32)(val >> 32), hi_offset, true, false);
+	}
 }
 
 static inline u32 csdev_access_read32(struct csdev_access *csa, u32 offset)

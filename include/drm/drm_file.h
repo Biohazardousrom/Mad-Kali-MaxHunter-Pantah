@@ -233,6 +233,10 @@ struct drm_file {
 	 * this only matches &drm_device.master if the master is the currently
 	 * active one.
 	 *
+	 * To update @master, both &drm_device.master_mutex and
+	 * @master_lookup_lock need to be held, therefore holding either of
+	 * them is safe and enough for the read side.
+	 *
 	 * When dereferencing this pointer, either hold struct
 	 * &drm_device.master_mutex for the duration of the pointer's use, or
 	 * use drm_file_get_master() if struct &drm_device.master_mutex is not
@@ -244,7 +248,7 @@ struct drm_file {
 	 */
 	struct drm_master *master;
 
-	/** @master_lock: Serializes @master. */
+	/** @master_lookup_lock: Serializes @master. */
 	spinlock_t master_lookup_lock;
 
 	/** @pid: Process that opened this file. */
@@ -416,14 +420,5 @@ void drm_send_event_timestamp_locked(struct drm_device *dev,
 				     ktime_t timestamp);
 
 struct file *mock_drm_getfile(struct drm_minor *minor, unsigned int flags);
-
-#ifdef CONFIG_MMU
-struct drm_vma_offset_manager;
-unsigned long drm_get_unmapped_area(struct file *file,
-				    unsigned long uaddr, unsigned long len,
-				    unsigned long pgoff, unsigned long flags,
-				    struct drm_vma_offset_manager *mgr);
-#endif /* CONFIG_MMU */
-
 
 #endif /* _DRM_FILE_H_ */

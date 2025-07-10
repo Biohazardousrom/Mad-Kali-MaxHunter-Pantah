@@ -11,6 +11,7 @@
 
 #include <linux/spi/spi.h>
 #include <linux/interrupt.h>
+#include <linux/iio/iio.h>
 #include <linux/iio/types.h>
 
 #define ADIS_WRITE_REG(reg) ((0x80 | (reg)))
@@ -57,6 +58,7 @@ struct adis_timeout {
  *			this should be the minimum size supported by the device.
  * @burst_max_len:	Holds the maximum burst size when the device supports
  *			more than one burst mode with different sizes
+ * @burst_max_speed_hz:	Maximum spi speed that can be used in burst mode
  */
 struct adis_data {
 	unsigned int read_delay;
@@ -86,6 +88,7 @@ struct adis_data {
 	unsigned int burst_reg_cmd;
 	unsigned int burst_len;
 	unsigned int burst_max_len;
+	unsigned int burst_max_speed_hz;
 };
 
 /**
@@ -129,7 +132,7 @@ struct adis {
 	unsigned long		irq_flag;
 	void			*buffer;
 
-	u8			tx[10] ____cacheline_aligned;
+	u8			tx[10] __aligned(IIO_DMA_MINALIGN);
 	u8			rx[4];
 };
 
@@ -380,10 +383,8 @@ static inline int adis_update_bits_base(struct adis *adis, unsigned int reg,
  * @val can lead to undesired behavior if the register to update is 16bit.
  */
 #define adis_update_bits(adis, reg, mask, val) ({			\
-	BUILD_BUG_ON(sizeof(val) == 1 || sizeof(val) == 8);		\
-	__builtin_choose_expr(sizeof(val) == 4,				\
-		adis_update_bits_base(adis, reg, mask, val, 4),         \
-		adis_update_bits_base(adis, reg, mask, val, 2));	\
+	BUILD_BUG_ON(sizeof(val) != 2 && sizeof(val) != 4);		\
+	adis_update_bits_base(adis, reg, mask, val, sizeof(val));	\
 })
 
 /**
@@ -398,10 +399,8 @@ static inline int adis_update_bits_base(struct adis *adis, unsigned int reg,
  * @val can lead to undesired behavior if the register to update is 16bit.
  */
 #define __adis_update_bits(adis, reg, mask, val) ({			\
-	BUILD_BUG_ON(sizeof(val) == 1 || sizeof(val) == 8);		\
-	__builtin_choose_expr(sizeof(val) == 4,				\
-		__adis_update_bits_base(adis, reg, mask, val, 4),	\
-		__adis_update_bits_base(adis, reg, mask, val, 2));	\
+	BUILD_BUG_ON(sizeof(val) != 2 && sizeof(val) != 4);		\
+	__adis_update_bits_base(adis, reg, mask, val, sizeof(val));	\
 })
 
 int __adis_check_status(struct adis *adis);
@@ -440,6 +439,16 @@ static inline int adis_initial_startup(struct adis *adis)
 	mutex_unlock(&adis->state_lock);
 
 	return ret;
+}
+
+static inline void adis_dev_lock(struct adis *adis)
+{
+	mutex_lock(&adis->state_lock);
+}
+
+static inline void adis_dev_unlock(struct adis *adis)
+{
+	mutex_unlock(&adis->state_lock);
 }
 
 int adis_single_conversion(struct iio_dev *indio_dev,

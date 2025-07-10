@@ -92,7 +92,7 @@ static const u32 fsi_base = 0xa0000000;
 static u16 aspeed_fsi_divisor = FSI_DIVISOR_DEFAULT;
 module_param_named(bus_div,aspeed_fsi_divisor, ushort, 0);
 
-#define OPB_POLL_TIMEOUT		10000
+#define OPB_POLL_TIMEOUT		500
 
 static int __opb_write(struct fsi_master_aspeed *aspeed, u32 addr,
 		       u32 val, u32 transfer_size)
@@ -101,11 +101,15 @@ static int __opb_write(struct fsi_master_aspeed *aspeed, u32 addr,
 	u32 reg, status;
 	int ret;
 
-	writel(CMD_WRITE, base + OPB0_RW);
-	writel(transfer_size, base + OPB0_XFER_SIZE);
-	writel(addr, base + OPB0_FSI_ADDR);
-	writel(val, base + OPB0_FSI_DATA_W);
-	writel(0x1, base + OPB_IRQ_CLEAR);
+	/*
+	 * The ordering of these writes up until the trigger
+	 * write does not matter, so use writel_relaxed.
+	 */
+	writel_relaxed(CMD_WRITE, base + OPB0_RW);
+	writel_relaxed(transfer_size, base + OPB0_XFER_SIZE);
+	writel_relaxed(addr, base + OPB0_FSI_ADDR);
+	writel_relaxed(val, base + OPB0_FSI_DATA_W);
+	writel_relaxed(0x1, base + OPB_IRQ_CLEAR);
 	writel(0x1, base + OPB_TRIGGER);
 
 	ret = readl_poll_timeout(base + OPB_IRQ_STATUS, reg,
@@ -149,10 +153,14 @@ static int __opb_read(struct fsi_master_aspeed *aspeed, uint32_t addr,
 	u32 result, reg;
 	int status, ret;
 
-	writel(CMD_READ, base + OPB0_RW);
-	writel(transfer_size, base + OPB0_XFER_SIZE);
-	writel(addr, base + OPB0_FSI_ADDR);
-	writel(0x1, base + OPB_IRQ_CLEAR);
+	/*
+	 * The ordering of these writes up until the trigger
+	 * write does not matter, so use writel_relaxed.
+	 */
+	writel_relaxed(CMD_READ, base + OPB0_RW);
+	writel_relaxed(transfer_size, base + OPB0_XFER_SIZE);
+	writel_relaxed(addr, base + OPB0_FSI_ADDR);
+	writel_relaxed(0x1, base + OPB_IRQ_CLEAR);
 	writel(0x1, base + OPB_TRIGGER);
 
 	ret = readl_poll_timeout(base + OPB_IRQ_STATUS, reg,
@@ -441,6 +449,7 @@ static ssize_t cfam_reset_store(struct device *dev, struct device_attribute *att
 {
 	struct fsi_master_aspeed *aspeed = dev_get_drvdata(dev);
 
+	trace_fsi_master_aspeed_cfam_reset(true);
 	mutex_lock(&aspeed->lock);
 	gpiod_set_value(aspeed->cfam_reset_gpio, 1);
 	usleep_range(900, 1000);
@@ -448,6 +457,7 @@ static ssize_t cfam_reset_store(struct device *dev, struct device_attribute *att
 	usleep_range(900, 1000);
 	opb_writel(aspeed, ctrl_base + FSI_MRESP0, cpu_to_be32(FSI_MRESP_RST_ALL_MASTER));
 	mutex_unlock(&aspeed->lock);
+	trace_fsi_master_aspeed_cfam_reset(false);
 
 	return count;
 }

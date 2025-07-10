@@ -151,7 +151,7 @@ static int vboxsf_fill_super(struct super_block *sb, struct fs_context *fc)
 		if (!sbi->nls) {
 			vbg_err("vboxsf: Count not load '%s' nls\n", nls_name);
 			err = -EINVAL;
-			goto fail_free;
+			goto fail_destroy_idr;
 		}
 	}
 
@@ -204,7 +204,7 @@ static int vboxsf_fill_super(struct super_block *sb, struct fs_context *fc)
 		err = -ENOMEM;
 		goto fail_unmap;
 	}
-	vboxsf_init_inode(sbi, iroot, &sbi->root_info);
+	vboxsf_init_inode(sbi, iroot, &sbi->root_info, false);
 	unlock_new_inode(iroot);
 
 	droot = d_make_root(iroot);
@@ -224,6 +224,7 @@ fail_free:
 		ida_simple_remove(&vboxsf_bdi_ida, sbi->bdi_id);
 	if (sbi->nls)
 		unload_nls(sbi->nls);
+fail_destroy_idr:
 	idr_destroy(&sbi->ino_idr);
 	kfree(sbi);
 	return err;
@@ -241,7 +242,7 @@ static struct inode *vboxsf_alloc_inode(struct super_block *sb)
 {
 	struct vboxsf_inode *sf_i;
 
-	sf_i = kmem_cache_alloc(vboxsf_inode_cachep, GFP_NOFS);
+	sf_i = alloc_inode_sb(sb, vboxsf_inode_cachep, GFP_NOFS);
 	if (!sf_i)
 		return NULL;
 
@@ -410,7 +411,7 @@ static int vboxsf_reconfigure(struct fs_context *fc)
 
 	/* Apply changed options to the root inode */
 	sbi->o = ctx->o;
-	vboxsf_init_inode(sbi, iroot, &sbi->root_info);
+	vboxsf_init_inode(sbi, iroot, &sbi->root_info, true);
 
 	return 0;
 }
@@ -482,5 +483,4 @@ module_exit(vboxsf_fini);
 MODULE_DESCRIPTION("Oracle VM VirtualBox Module for Host File System Access");
 MODULE_AUTHOR("Oracle Corporation");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(ANDROID_GKI_VFS_EXPORT_ONLY);
 MODULE_ALIAS_FS("vboxsf");

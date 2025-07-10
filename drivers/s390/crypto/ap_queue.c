@@ -20,7 +20,7 @@ static void __ap_flush_queue(struct ap_queue *aq);
 
 /**
  * ap_queue_enable_irq(): Enable interrupt support on this AP queue.
- * @qid: The AP queue number
+ * @aq: The AP queue
  * @ind: the notification indicator byte
  *
  * Enables interruption on AP queue via ap_aqic(). Based on the return
@@ -34,7 +34,7 @@ static int ap_queue_enable_irq(struct ap_queue *aq, void *ind)
 
 	qirqctrl.ir = 1;
 	qirqctrl.isc = AP_ISC;
-	status = ap_aqic(aq->qid, qirqctrl, ind);
+	status = ap_aqic(aq->qid, qirqctrl, virt_to_phys(ind));
 	switch (status.response_code) {
 	case AP_RESPONSE_NORMAL:
 	case AP_RESPONSE_OTHERWISE_CHANGED:
@@ -99,9 +99,9 @@ int ap_recv(ap_qid_t qid, unsigned long long *psmid, void *msg, size_t length)
 {
 	struct ap_queue_status status;
 
-	if (msg == NULL)
+	if (!msg)
 		return -EINVAL;
-	status = ap_dqap(qid, psmid, msg, length);
+	status = ap_dqap(qid, psmid, msg, length, NULL, NULL);
 	switch (status.response_code) {
 	case AP_RESPONSE_NORMAL:
 		return 0;
@@ -136,9 +136,24 @@ static struct ap_queue_status ap_sm_recv(struct ap_queue *aq)
 	struct ap_queue_status status;
 	struct ap_message *ap_msg;
 	bool found = false;
+	size_t reslen;
+	unsigned long resgr0 = 0;
+	int parts = 0;
 
-	status = ap_dqap(aq->qid, &aq->reply->psmid,
-			 aq->reply->msg, aq->reply->len);
+	/*
+	 * DQAP loop until response code and resgr0 indicate that
+	 * the msg is totally received. As we use the very same buffer
+	 * the msg is overwritten with each invocation. That's intended
+	 * and the receiver of the msg is informed with a msg rc code
+	 * of EMSGSIZE in such a case.
+	 */
+	do {
+		status = ap_dqap(aq->qid, &aq->reply->psmid,
+				 aq->reply->msg, aq->reply->bufsize,
+				 &reslen, &resgr0);
+		parts++;
+	} while (status.response_code == 0xFF && resgr0 != 0);
+
 	switch (status.response_code) {
 	case AP_RESPONSE_NORMAL:
 		aq->queue_count = max_t(int, 0, aq->queue_count - 1);
@@ -152,7 +167,12 @@ static struct ap_queue_status ap_sm_recv(struct ap_queue *aq)
 				continue;
 			list_del_init(&ap_msg->list);
 			aq->pendingq_count--;
-			ap_msg->receive(aq, ap_msg, aq->reply);
+			if (parts > 1) {
+				ap_msg->rc = -EMSGSIZE;
+				ap_msg->receive(aq, ap_msg, NULL);
+			} else {
+				ap_msg->receive(aq, ap_msg, aq->reply);
+			}
 			found = true;
 			break;
 		}
@@ -228,6 +248,7 @@ static enum ap_sm_wait ap_sm_write(struct ap_queue *aq)
 
 	if (aq->requestq_count <= 0)
 		return AP_SM_WAIT_NONE;
+
 	/* Start the next request on the queue. */
 	ap_msg = list_entry(aq->requestq.next, struct ap_message, list);
 #ifdef CONFIG_ZCRYPT_DEBUG
@@ -261,7 +282,7 @@ static enum ap_sm_wait ap_sm_write(struct ap_queue *aq)
 		aq->sm_state = AP_SM_STATE_RESET_WAIT;
 		return AP_SM_WAIT_TIMEOUT;
 	case AP_RESPONSE_INVALID_DOMAIN:
-		AP_DBF(DBF_WARN, "AP_RESPONSE_INVALID_DOMAIN on NQAP\n");
+		AP_DBF_WARN("%s RESPONSE_INVALID_DOMAIN on NQAP\n", __func__);
 		fallthrough;
 	case AP_RESPONSE_MESSAGE_TOO_BIG:
 	case AP_RESPONSE_REQ_FAC_NOT_INST:
@@ -293,7 +314,7 @@ static enum ap_sm_wait ap_sm_read_write(struct ap_queue *aq)
 
 /**
  * ap_sm_reset(): Reset an AP queue.
- * @qid: The AP queue number
+ * @aq: The AP queue
  *
  * Submit the Reset command to an AP queue.
  */
@@ -434,7 +455,8 @@ static ap_func_t *ap_jumptable[NR_AP_SM_STATES][NR_AP_SM_EVENTS] = {
 
 enum ap_sm_wait ap_sm_event(struct ap_queue *aq, enum ap_sm_event event)
 {
-	if (aq->dev_state > AP_DEV_STATE_UNINITIATED)
+	if (aq->config && !aq->chkstop &&
+	    aq->dev_state > AP_DEV_STATE_UNINITIATED)
 		return ap_jumptable[aq->sm_state][event](aq);
 	else
 		return AP_SM_WAIT_NONE;
@@ -553,8 +575,8 @@ static ssize_t reset_store(struct device *dev,
 	ap_wait(ap_sm_event(aq, AP_SM_EVENT_POLL));
 	spin_unlock_bh(&aq->lock);
 
-	AP_DBF(DBF_INFO, "reset queue=%02x.%04x triggered by user\n",
-	       AP_QID_CARD(aq->qid), AP_QID_QUEUE(aq->qid));
+	AP_DBF_INFO("%s reset queue=%02x.%04x triggered by user\n",
+		    __func__, AP_QID_CARD(aq->qid), AP_QID_QUEUE(aq->qid));
 
 	return count;
 }
@@ -581,7 +603,7 @@ static ssize_t interrupt_show(struct device *dev,
 static DEVICE_ATTR_RO(interrupt);
 
 static ssize_t config_show(struct device *dev,
-			     struct device_attribute *attr, char *buf)
+			   struct device_attribute *attr, char *buf)
 {
 	struct ap_queue *aq = to_ap_queue(dev);
 	int rc;
@@ -593,6 +615,20 @@ static ssize_t config_show(struct device *dev,
 }
 
 static DEVICE_ATTR_RO(config);
+
+static ssize_t chkstop_show(struct device *dev,
+			    struct device_attribute *attr, char *buf)
+{
+	struct ap_queue *aq = to_ap_queue(dev);
+	int rc;
+
+	spin_lock_bh(&aq->lock);
+	rc = scnprintf(buf, PAGE_SIZE, "%d\n", aq->chkstop ? 1 : 0);
+	spin_unlock_bh(&aq->lock);
+	return rc;
+}
+
+static DEVICE_ATTR_RO(chkstop);
 
 #ifdef CONFIG_ZCRYPT_DEBUG
 static ssize_t states_show(struct device *dev,
@@ -708,6 +744,7 @@ static struct attribute *ap_queue_dev_attrs[] = {
 	&dev_attr_reset.attr,
 	&dev_attr_interrupt.attr,
 	&dev_attr_config.attr,
+	&dev_attr_chkstop.attr,
 #ifdef CONFIG_ZCRYPT_DEBUG
 	&dev_attr_states.attr,
 	&dev_attr_last_err_rc.attr,
@@ -790,8 +827,9 @@ int ap_queue_message(struct ap_queue *aq, struct ap_message *ap_msg)
 		aq->requestq_count++;
 		aq->total_request_count++;
 		atomic64_inc(&aq->card->total_request_count);
-	} else
+	} else {
 		rc = -ENODEV;
+	}
 
 	/* Send/receive as many request from the queue as possible. */
 	ap_wait(ap_sm_event_loop(aq, AP_SM_EVENT_POLL));
@@ -894,6 +932,7 @@ void ap_queue_init_state(struct ap_queue *aq)
 	spin_lock_bh(&aq->lock);
 	aq->dev_state = AP_DEV_STATE_OPERATING;
 	aq->sm_state = AP_SM_STATE_RESET_START;
+	aq->last_err_rc = 0;
 	ap_wait(ap_sm_event(aq, AP_SM_EVENT_POLL));
 	spin_unlock_bh(&aq->lock);
 }

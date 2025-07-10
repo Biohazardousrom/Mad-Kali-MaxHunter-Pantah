@@ -11,11 +11,12 @@
 #include <sound/core.h>
 #include <sound/intel-dsp-config.h>
 #include <sound/intel-nhlt.h>
+#include <sound/soc-acpi.h>
 
 static int dsp_driver;
 
 module_param(dsp_driver, int, 0444);
-MODULE_PARM_DESC(dsp_driver, "Force the DSP driver for Intel DSP (0=auto, 1=legacy, 2=SST, 3=SOF)");
+MODULE_PARM_DESC(dsp_driver, "Force the DSP driver for Intel DSP (0=auto, 1=legacy, 2=SST, 3=SOF, 4=AVS)");
 
 #define FLAG_SST			BIT(0)
 #define FLAG_SOF			BIT(1)
@@ -29,8 +30,14 @@ MODULE_PARM_DESC(dsp_driver, "Force the DSP driver for Intel DSP (0=auto, 1=lega
 struct config_entry {
 	u32 flags;
 	u16 device;
+	u8 acpi_hid[ACPI_ID_LEN];
 	const struct dmi_system_id *dmi_table;
-	u8 codec_hid[ACPI_ID_LEN];
+	const struct snd_soc_acpi_codecs *codec_hid;
+};
+
+static const struct snd_soc_acpi_codecs __maybe_unused essx_83x6 = {
+	.num_codecs = 3,
+	.codecs = { "ESSX8316", "ESSX8326", "ESSX8336"},
 };
 
 /*
@@ -76,7 +83,7 @@ static const struct config_entry config_table[] = {
 	{
 		.flags = FLAG_SOF,
 		.device = 0x5a98,
-		.codec_hid = "ESSX8336",
+		.codec_hid =  &essx_83x6,
 	},
 #endif
 #if IS_ENABLED(CONFIG_SND_SOC_INTEL_APL)
@@ -162,7 +169,7 @@ static const struct config_entry config_table[] = {
 	{
 		.flags = FLAG_SOF,
 		.device = 0x3198,
-		.codec_hid = "ESSX8336",
+		.codec_hid =  &essx_83x6,
 	},
 #endif
 
@@ -189,8 +196,19 @@ static const struct config_entry config_table[] = {
 					DMI_MATCH(DMI_SYS_VENDOR, "Google"),
 				}
 			},
+			{
+				.ident = "UP-WHL",
+				.matches = {
+					DMI_MATCH(DMI_SYS_VENDOR, "AAEON"),
+				}
+			},
 			{}
 		}
+	},
+	{
+		.flags = FLAG_SOF,
+		.device = 0x09dc8,
+		.codec_hid =  &essx_83x6,
 	},
 	{
 		.flags = FLAG_SOF | FLAG_SOF_ONLY_IF_DMIC_OR_SOUNDWIRE,
@@ -248,13 +266,13 @@ static const struct config_entry config_table[] = {
 		}
 	},
 	{
-		.flags = FLAG_SOF | FLAG_SOF_ONLY_IF_DMIC_OR_SOUNDWIRE,
-		.device = 0x02c8,
-	},
-	{
 		.flags = FLAG_SOF,
 		.device = 0x02c8,
-		.codec_hid = "ESSX8336",
+		.codec_hid =  &essx_83x6,
+	},
+	{
+		.flags = FLAG_SOF | FLAG_SOF_ONLY_IF_DMIC_OR_SOUNDWIRE,
+		.device = 0x02c8,
 	},
 /* Cometlake-H */
 	{
@@ -277,13 +295,13 @@ static const struct config_entry config_table[] = {
 		}
 	},
 	{
-		.flags = FLAG_SOF | FLAG_SOF_ONLY_IF_DMIC_OR_SOUNDWIRE,
-		.device = 0x06c8,
-	},
-		{
 		.flags = FLAG_SOF,
 		.device = 0x06c8,
-		.codec_hid = "ESSX8336",
+		.codec_hid =  &essx_83x6,
+	},
+	{
+		.flags = FLAG_SOF | FLAG_SOF_ONLY_IF_DMIC_OR_SOUNDWIRE,
+		.device = 0x06c8,
 	},
 #endif
 
@@ -303,25 +321,21 @@ static const struct config_entry config_table[] = {
 		}
 	},
 	{
+		.flags = FLAG_SOF,
+		.device = 0x34c8,
+		.codec_hid =  &essx_83x6,
+	},
+	{
 		.flags = FLAG_SOF | FLAG_SOF_ONLY_IF_DMIC_OR_SOUNDWIRE,
 		.device = 0x34c8,
 	},
 #endif
 
-/* JasperLake */
+/* Jasper Lake */
 #if IS_ENABLED(CONFIG_SND_SOC_SOF_JASPERLAKE)
 	{
 		.flags = FLAG_SOF,
 		.device = 0x4dc8,
-		.codec_hid = "ESSX8336",
-	},
-#endif
-
-/* Tigerlake */
-#if IS_ENABLED(CONFIG_SND_SOC_SOF_TIGERLAKE)
-	{
-		.flags = FLAG_SOF,
-		.device = 0xa0c8,
 		.dmi_table = (const struct dmi_system_id []) {
 			{
 				.ident = "Google Chromebooks",
@@ -339,17 +353,49 @@ static const struct config_entry config_table[] = {
 		}
 	},
 	{
+		.flags = FLAG_SOF,
+		.device = 0x4dc8,
+		.codec_hid =  &essx_83x6,
+	},
+	{
+		.flags = FLAG_SOF | FLAG_SOF_ONLY_IF_DMIC,
+		.device = 0x4dc8,
+	},
+#endif
+
+/* Tigerlake */
+#if IS_ENABLED(CONFIG_SND_SOC_SOF_TIGERLAKE)
+	{
+		.flags = FLAG_SOF,
+		.device = 0xa0c8,
+		.dmi_table = (const struct dmi_system_id []) {
+			{
+				.ident = "Google Chromebooks",
+				.matches = {
+					DMI_MATCH(DMI_SYS_VENDOR, "Google"),
+				}
+			},
+			{
+				.ident = "UPX-TGL",
+				.matches = {
+					DMI_MATCH(DMI_SYS_VENDOR, "AAEON"),
+				}
+			},
+			{}
+		}
+	},
+	{
+		.flags = FLAG_SOF,
+		.device = 0xa0c8,
+		.codec_hid =  &essx_83x6,
+	},
+	{
 		.flags = FLAG_SOF | FLAG_SOF_ONLY_IF_DMIC_OR_SOUNDWIRE,
 		.device = 0xa0c8,
 	},
 	{
 		.flags = FLAG_SOF | FLAG_SOF_ONLY_IF_DMIC_OR_SOUNDWIRE,
 		.device = 0x43c8,
-	},
-	{
-		.flags = FLAG_SOF,
-		.device = 0xa0c8,
-		.codec_hid = "ESSX8336",
 	},
 #endif
 
@@ -365,22 +411,79 @@ static const struct config_entry config_table[] = {
 	},
 #endif
 
+/* Alder Lake */
+#if IS_ENABLED(CONFIG_SND_SOC_SOF_ALDERLAKE)
+	/* Alderlake-S */
+	{
+		.flags = FLAG_SOF | FLAG_SOF_ONLY_IF_DMIC_OR_SOUNDWIRE,
+		.device = 0x7ad0,
+	},
+	/* RaptorLake-S */
+	{
+		.flags = FLAG_SOF | FLAG_SOF_ONLY_IF_DMIC_OR_SOUNDWIRE,
+		.device = 0x7a50,
+	},
+	/* Alderlake-P */
+	{
+		.flags = FLAG_SOF,
+		.device = 0x51c8,
+		.codec_hid =  &essx_83x6,
+	},
+	{
+		.flags = FLAG_SOF | FLAG_SOF_ONLY_IF_DMIC_OR_SOUNDWIRE,
+		.device = 0x51c8,
+	},
+	{
+		.flags = FLAG_SOF | FLAG_SOF_ONLY_IF_DMIC_OR_SOUNDWIRE,
+		.device = 0x51cd,
+	},
+	/* Alderlake-PS */
+	{
+		.flags = FLAG_SOF,
+		.device = 0x51c9,
+		.codec_hid =  &essx_83x6,
+	},
+	{
+		.flags = FLAG_SOF | FLAG_SOF_ONLY_IF_DMIC_OR_SOUNDWIRE,
+		.device = 0x51c9,
+	},
+	/* Alderlake-M */
+	{
+		.flags = FLAG_SOF | FLAG_SOF_ONLY_IF_DMIC_OR_SOUNDWIRE,
+		.device = 0x51cc,
+	},
+	/* Alderlake-N */
+	{
+		.flags = FLAG_SOF | FLAG_SOF_ONLY_IF_DMIC_OR_SOUNDWIRE,
+		.device = 0x54c8,
+	},
+	/* RaptorLake-P */
+	{
+		.flags = FLAG_SOF | FLAG_SOF_ONLY_IF_DMIC_OR_SOUNDWIRE,
+		.device = 0x51ca,
+	},
+	{
+		.flags = FLAG_SOF | FLAG_SOF_ONLY_IF_DMIC_OR_SOUNDWIRE,
+		.device = 0x51cb,
+	},
+	/* RaptorLake-M */
+	{
+		.flags = FLAG_SOF | FLAG_SOF_ONLY_IF_DMIC_OR_SOUNDWIRE,
+		.device = 0x51ce,
+	},
+	/* RaptorLake-PX */
+	{
+		.flags = FLAG_SOF | FLAG_SOF_ONLY_IF_DMIC_OR_SOUNDWIRE,
+		.device = 0x51cf,
+	},
+#endif
+
 /* Meteor Lake */
 #if IS_ENABLED(CONFIG_SND_SOC_SOF_METEORLAKE)
 	/* Meteorlake-P */
 	{
 		.flags = FLAG_SOF | FLAG_SOF_ONLY_IF_DMIC_OR_SOUNDWIRE,
 		.device = 0x7e28,
-	},
-	/* ArrowLake-S */
-	{
-		.flags = FLAG_SOF | FLAG_SOF_ONLY_IF_DMIC_OR_SOUNDWIRE,
-		.device = PCI_DEVICE_ID_INTEL_HDA_ARL_S,
-	},
-	/* ArrowLake */
-	{
-		.flags = FLAG_SOF | FLAG_SOF_ONLY_IF_DMIC_OR_SOUNDWIRE,
-		.device = PCI_DEVICE_ID_INTEL_HDA_ARL,
 	},
 #endif
 
@@ -405,8 +508,38 @@ static const struct config_entry *snd_intel_dsp_find_config
 			continue;
 		if (table->dmi_table && !dmi_check_system(table->dmi_table))
 			continue;
-		if (table->codec_hid[0] && !acpi_dev_present(table->codec_hid, NULL, -1))
-			continue;
+		if (table->codec_hid) {
+			int i;
+
+			for (i = 0; i < table->codec_hid->num_codecs; i++) {
+				struct nhlt_acpi_table *nhlt;
+				bool ssp_found = false;
+
+				if (!acpi_dev_present(table->codec_hid->codecs[i], NULL, -1))
+					continue;
+
+				nhlt = intel_nhlt_init(&pci->dev);
+				if (!nhlt) {
+					dev_warn(&pci->dev, "%s: NHLT table not found, skipped HID %s\n",
+						 __func__, table->codec_hid->codecs[i]);
+					continue;
+				}
+
+				if (intel_nhlt_has_endpoint_type(nhlt, NHLT_LINK_SSP) &&
+				    intel_nhlt_ssp_endpoint_mask(nhlt, NHLT_DEVICE_I2S))
+					ssp_found = true;
+
+				intel_nhlt_free(nhlt);
+
+				if (ssp_found)
+					break;
+
+				dev_warn(&pci->dev, "%s: no valid SSP found for HID %s, skipped\n",
+					 __func__, table->codec_hid->codecs[i]);
+			}
+			if (i == table->codec_hid->num_codecs)
+				continue;
+		}
 		return table;
 	}
 	return NULL;
@@ -419,7 +552,7 @@ static int snd_intel_dsp_check_dmic(struct pci_dev *pci)
 
 	nhlt = intel_nhlt_init(&pci->dev);
 	if (nhlt) {
-		if (intel_nhlt_get_dmic_geo(&pci->dev, nhlt))
+		if (intel_nhlt_has_endpoint_type(nhlt, NHLT_LINK_DMIC))
 			ret = 1;
 		intel_nhlt_free(nhlt);
 	}
@@ -455,6 +588,20 @@ int snd_intel_dsp_driver_probe(struct pci_dev *pci)
 	/* Intel vendor only */
 	if (pci->vendor != 0x8086)
 		return SND_INTEL_DSP_DRIVER_ANY;
+
+	/*
+	 * Legacy devices don't have a PCI-based DSP and use HDaudio
+	 * for HDMI/DP support, ignore kernel parameter
+	 */
+	switch (pci->device) {
+	case 0x160c: /* Broadwell */
+	case 0x0a0c: /* Haswell */
+	case 0x0c0c:
+	case 0x0d0c:
+	case 0x0f04: /* Baytrail */
+	case 0x2284: /* Braswell */
+		return SND_INTEL_DSP_DRIVER_ANY;
+	}
 
 	if (dsp_driver > 0 && dsp_driver <= SND_INTEL_DSP_DRIVER_LAST)
 		return dsp_driver;
@@ -511,6 +658,97 @@ int snd_intel_dsp_driver_probe(struct pci_dev *pci)
 }
 EXPORT_SYMBOL_GPL(snd_intel_dsp_driver_probe);
 
+/* Should we default to SOF or SST for BYT/CHT ? */
+#if IS_ENABLED(CONFIG_SND_INTEL_BYT_PREFER_SOF) || \
+    !IS_ENABLED(CONFIG_SND_SST_ATOM_HIFI2_PLATFORM_ACPI)
+#define FLAG_SST_OR_SOF_BYT	FLAG_SOF
+#else
+#define FLAG_SST_OR_SOF_BYT	FLAG_SST
+#endif
+
+/*
+ * configuration table
+ * - the order of similar ACPI ID entries is important!
+ * - the first successful match will win
+ */
+static const struct config_entry acpi_config_table[] = {
+#if IS_ENABLED(CONFIG_SND_SST_ATOM_HIFI2_PLATFORM_ACPI) || \
+    IS_ENABLED(CONFIG_SND_SOC_SOF_BAYTRAIL)
+/* BayTrail */
+	{
+		.flags = FLAG_SST_OR_SOF_BYT,
+		.acpi_hid = "80860F28",
+	},
+/* CherryTrail */
+	{
+		.flags = FLAG_SST_OR_SOF_BYT,
+		.acpi_hid = "808622A8",
+	},
+#endif
+/* Broadwell */
+#if IS_ENABLED(CONFIG_SND_SOC_INTEL_CATPT)
+	{
+		.flags = FLAG_SST,
+		.acpi_hid = "INT3438"
+	},
+#endif
+#if IS_ENABLED(CONFIG_SND_SOC_SOF_BROADWELL)
+	{
+		.flags = FLAG_SOF,
+		.acpi_hid = "INT3438"
+	},
+#endif
+/* Haswell - not supported by SOF but added for consistency */
+#if IS_ENABLED(CONFIG_SND_SOC_INTEL_CATPT)
+	{
+		.flags = FLAG_SST,
+		.acpi_hid = "INT33C8"
+	},
+#endif
+};
+
+static const struct config_entry *snd_intel_acpi_dsp_find_config(const u8 acpi_hid[ACPI_ID_LEN],
+								 const struct config_entry *table,
+								 u32 len)
+{
+	for (; len > 0; len--, table++) {
+		if (memcmp(table->acpi_hid, acpi_hid, ACPI_ID_LEN))
+			continue;
+		if (table->dmi_table && !dmi_check_system(table->dmi_table))
+			continue;
+		return table;
+	}
+	return NULL;
+}
+
+int snd_intel_acpi_dsp_driver_probe(struct device *dev, const u8 acpi_hid[ACPI_ID_LEN])
+{
+	const struct config_entry *cfg;
+
+	if (dsp_driver > SND_INTEL_DSP_DRIVER_LEGACY && dsp_driver <= SND_INTEL_DSP_DRIVER_LAST)
+		return dsp_driver;
+
+	if (dsp_driver == SND_INTEL_DSP_DRIVER_LEGACY) {
+		dev_warn(dev, "dsp_driver parameter %d not supported, using automatic detection\n",
+			 SND_INTEL_DSP_DRIVER_LEGACY);
+	}
+
+	/* find the configuration for the specific device */
+	cfg = snd_intel_acpi_dsp_find_config(acpi_hid,  acpi_config_table,
+					     ARRAY_SIZE(acpi_config_table));
+	if (!cfg)
+		return SND_INTEL_DSP_DRIVER_ANY;
+
+	if (cfg->flags & FLAG_SST)
+		return SND_INTEL_DSP_DRIVER_SST;
+
+	if (cfg->flags & FLAG_SOF)
+		return SND_INTEL_DSP_DRIVER_SOF;
+
+	return SND_INTEL_DSP_DRIVER_SST;
+}
+EXPORT_SYMBOL_GPL(snd_intel_acpi_dsp_driver_probe);
+
 MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("Intel DSP config driver");
-MODULE_IMPORT_NS(SOUNDWIRE_INTEL_INIT);
+MODULE_IMPORT_NS(SND_INTEL_SOUNDWIRE_ACPI);

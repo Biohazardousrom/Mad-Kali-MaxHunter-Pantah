@@ -8,7 +8,6 @@
 #include <trace/hooks/vendor_hooks.h>
 
 struct user_struct;
-
 DECLARE_HOOK(android_vh_alloc_uid,
 	TP_PROTO(struct user_struct *user),
 	TP_ARGS(user));

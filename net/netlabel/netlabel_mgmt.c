@@ -63,7 +63,7 @@ static const struct nla_policy netlbl_mgmt_genl_policy[NLBL_MGMT_A_MAX + 1] = {
  */
 
 /**
- * netlbl_mgmt_add - Handle an ADD message
+ * netlbl_mgmt_add_common - Handle an ADD message
  * @info: the Generic NETLINK info block
  * @audit_info: NetLabel audit information
  *
@@ -96,7 +96,7 @@ static int netlbl_mgmt_add_common(struct genl_info *info,
 			ret_val = -ENOMEM;
 			goto add_free_entry;
 		}
-		nla_strlcpy(entry->domain,
+		nla_strscpy(entry->domain,
 			    info->attrs[NLBL_MGMT_A_DOMAIN], tmp_size);
 	}
 
@@ -826,6 +826,7 @@ static struct genl_family netlbl_mgmt_gnl_family __ro_after_init = {
 	.module = THIS_MODULE,
 	.small_ops = netlbl_mgmt_genl_ops,
 	.n_small_ops = ARRAY_SIZE(netlbl_mgmt_genl_ops),
+	.resv_start_op = NLBL_MGMT_C_VERSION + 1,
 };
 
 /*

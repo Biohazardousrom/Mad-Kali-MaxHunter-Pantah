@@ -698,8 +698,7 @@ static void ext4_es_insert_extent_ext_check(struct inode *inode,
 		}
 	}
 out:
-	ext4_ext_drop_refs(path);
-	kfree(path);
+	ext4_free_ext_path(path);
 }
 
 static void ext4_es_insert_extent_ind_check(struct inode *inode,
@@ -846,10 +845,12 @@ out:
 /*
  * ext4_es_insert_extent() adds information to an inode's extent
  * status tree.
+ *
+ * Return 0 on success, error code on failure.
  */
-void ext4_es_insert_extent(struct inode *inode, ext4_lblk_t lblk,
-			   ext4_lblk_t len, ext4_fsblk_t pblk,
-			   unsigned int status)
+int ext4_es_insert_extent(struct inode *inode, ext4_lblk_t lblk,
+			  ext4_lblk_t len, ext4_fsblk_t pblk,
+			  unsigned int status)
 {
 	struct extent_status newes;
 	ext4_lblk_t end = lblk + len - 1;
@@ -861,13 +862,13 @@ void ext4_es_insert_extent(struct inode *inode, ext4_lblk_t lblk,
 	bool revise_pending = false;
 
 	if (EXT4_SB(inode->i_sb)->s_mount_state & EXT4_FC_REPLAY)
-		return;
+		return 0;
 
 	es_debug("add [%u/%u) %llu %x to extent status tree of inode %lu\n",
 		 lblk, len, pblk, status, inode->i_ino);
 
 	if (!len)
-		return;
+		return 0;
 
 	BUG_ON(end < lblk);
 
@@ -936,7 +937,7 @@ error:
 		goto retry;
 
 	ext4_es_print_tree(inode);
-	return;
+	return 0;
 }
 
 /*
@@ -1732,7 +1733,8 @@ int ext4_es_register_shrinker(struct ext4_sb_info *sbi)
 	sbi->s_es_shrinker.scan_objects = ext4_es_scan;
 	sbi->s_es_shrinker.count_objects = ext4_es_count;
 	sbi->s_es_shrinker.seeks = DEFAULT_SEEKS;
-	err = register_shrinker(&sbi->s_es_shrinker);
+	err = register_shrinker(&sbi->s_es_shrinker, "ext4-es:%s",
+				sbi->s_sb->s_id);
 	if (err)
 		goto err4;
 

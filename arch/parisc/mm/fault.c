@@ -22,6 +22,8 @@
 
 #include <asm/traps.h>
 
+#define DEBUG_NATLB 0
+
 /* Various important other fields */
 #define bit22set(x)		(x & 0x00000200)
 #define bits23_25set(x)		(x & 0x000001c0)
@@ -36,7 +38,7 @@ int show_unhandled_signals = 1;
 /*
  * parisc_acctyp(unsigned int inst) --
  *    Given a PA-RISC memory access instruction, determine if the
- *    the instruction would perform a memory read or memory write
+ *    instruction would perform a memory read or memory write
  *    operation.
  *
  *    This function assumes that the given instruction is a memory access
@@ -48,7 +50,7 @@ int show_unhandled_signals = 1;
  *   VM_WRITE if write operation
  *   VM_EXEC  if execute operation
  */
-static unsigned long
+unsigned long
 parisc_acctyp(unsigned long code, unsigned int inst)
 {
 	if (code == 6 || code == 16)
@@ -148,11 +150,16 @@ int fixup_exception(struct pt_regs *regs)
 		 * Fix up get_user() and put_user().
 		 * ASM_EXCEPTIONTABLE_ENTRY_EFAULT() sets the least-significant
 		 * bit in the relative address of the fixup routine to indicate
-		 * that %r8 should be loaded with -EFAULT to report a userspace
+		 * that the register encoded in the "or %r0,%r0,register"
+		 * opcode should be loaded with -EFAULT to report a userspace
 		 * access error.
 		 */
 		if (fix->fixup & 1) {
-			regs->gr[8] = -EFAULT;
+			int fault_error_reg = fix->err_opcode & 0x1f;
+			if (!WARN_ON(!fault_error_reg))
+				regs->gr[fault_error_reg] = -EFAULT;
+			pr_debug("Unalignment fixup of register %d at %pS\n",
+				fault_error_reg, (void*)regs->iaoq[0]);
 
 			/* zero target register for get_user() */
 			if (parisc_acctyp(0, regs->iir) == VM_READ) {
@@ -266,14 +273,14 @@ void do_page_fault(struct pt_regs *regs, unsigned long code,
 	unsigned long acc_type;
 	vm_fault_t fault = 0;
 	unsigned int flags;
-
-	if (faulthandler_disabled())
-		goto no_context;
+	char *msg;
 
 	tsk = current;
 	mm = tsk->mm;
-	if (!mm)
+	if (!mm) {
+		msg = "Page fault: no context";
 		goto no_context;
+	}
 
 	flags = FAULT_FLAG_DEFAULT;
 	if (user_mode(regs))
@@ -286,14 +293,18 @@ void do_page_fault(struct pt_regs *regs, unsigned long code,
 retry:
 	mmap_read_lock(mm);
 	vma = find_vma_prev(mm, address, &prev_vma);
-	if (!vma || address < vma->vm_start)
-		goto check_expansion;
+	if (!vma || address < vma->vm_start) {
+		if (!prev || !(prev->vm_flags & VM_GROWSUP))
+			goto bad_area;
+		vma = expand_stack(mm, address);
+		if (!vma)
+			goto bad_area_nosemaphore;
+	}
+
 /*
  * Ok, we have a good vm_area for this memory access. We still need to
  * check the access permissions.
  */
-
-good_area:
 
 	if ((vma->vm_flags & acc_type) != acc_type)
 		goto bad_area;
@@ -307,6 +318,10 @@ good_area:
 	fault = handle_mm_fault(vma, address, flags, regs);
 
 	if (fault_signal_pending(fault, regs))
+		return;
+
+	/* The fault is fully completed (including releasing mmap lock) */
+	if (fault & VM_FAULT_COMPLETED)
 		return;
 
 	if (unlikely(fault & VM_FAULT_ERROR)) {
@@ -324,24 +339,17 @@ good_area:
 			goto bad_area;
 		BUG();
 	}
-	if (flags & FAULT_FLAG_ALLOW_RETRY) {
-		if (fault & VM_FAULT_RETRY) {
-			/*
-			 * No need to mmap_read_unlock(mm) as we would
-			 * have already released it in __lock_page_or_retry
-			 * in mm/filemap.c.
-			 */
-			flags |= FAULT_FLAG_TRIED;
-			goto retry;
-		}
+	if (fault & VM_FAULT_RETRY) {
+		/*
+		 * No need to mmap_read_unlock(mm) as we would
+		 * have already released it in __lock_page_or_retry
+		 * in mm/filemap.c.
+		 */
+		flags |= FAULT_FLAG_TRIED;
+		goto retry;
 	}
 	mmap_read_unlock(mm);
 	return;
-
-check_expansion:
-	vma = prev_vma;
-	if (vma && (expand_stack(vma, address) == 0))
-		goto good_area;
 
 /*
  * Something tried to access memory that isn't in our memory map..
@@ -349,6 +357,7 @@ check_expansion:
 bad_area:
 	mmap_read_unlock(mm);
 
+bad_area_nosemaphore:
 	if (user_mode(regs)) {
 		int signo, si_code;
 
@@ -409,6 +418,7 @@ bad_area:
 		force_sig_fault(signo, si_code, (void __user *) address);
 		return;
 	}
+	msg = "Page fault: bad address";
 
 no_context:
 
@@ -416,12 +426,14 @@ no_context:
 		return;
 	}
 
-	parisc_terminate("Bad Address (null pointer deref?)", regs, code, address);
+	parisc_terminate(msg, regs, code, address);
 
-  out_of_memory:
+out_of_memory:
 	mmap_read_unlock(mm);
-	if (!user_mode(regs))
+	if (!user_mode(regs)) {
+		msg = "Page fault: out of memory";
 		goto no_context;
+	}
 	pagefault_out_of_memory();
 }
 
@@ -437,7 +449,7 @@ handle_nadtlb_fault(struct pt_regs *regs)
 {
 	unsigned long insn = regs->iir;
 	int breg, treg, xreg, val = 0;
-	struct vm_area_struct *vma, *prev_vma;
+	struct vm_area_struct *vma;
 	struct task_struct *tsk;
 	struct mm_struct *mm;
 	unsigned long address;
@@ -449,8 +461,8 @@ handle_nadtlb_fault(struct pt_regs *regs)
 		fallthrough;
 	case 0x380:
 		/* PDC and FIC instructions */
-		if (printk_ratelimit()) {
-			pr_warn("BUG: nullifying cache flush/purge instruction\n");
+		if (DEBUG_NATLB && printk_ratelimit()) {
+			pr_warn("WARNING: nullifying cache flush/purge instruction\n");
 			show_regs(regs);
 		}
 		if (insn & 0x20) {
@@ -473,7 +485,7 @@ handle_nadtlb_fault(struct pt_regs *regs)
 				/* Search for VMA */
 				address = regs->ior;
 				mmap_read_lock(mm);
-				vma = find_vma_prev(mm, address, &prev_vma);
+				vma = vma_lookup(mm, address);
 				mmap_read_unlock(mm);
 
 				/*
@@ -482,7 +494,6 @@ handle_nadtlb_fault(struct pt_regs *regs)
 				 */
 				acc_type = (insn & 0x40) ? VM_WRITE : VM_READ;
 				if (vma
-				    && address >= vma->vm_start
 				    && (vma->vm_flags & acc_type) == acc_type)
 					val = 1;
 			}

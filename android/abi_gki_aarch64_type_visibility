@@ -1,5 +1,8 @@
 [abi_symbol_list]
 
 # for type visibility
-  GKI_struct_blk_mq_alloc_data
-  GKI_struct_cgroup_taskset
+  ANDROID_GKI_struct_dwc3
+  ANDROID_GKI_struct_kernel_all_info
+
+# symbol no longer needed
+  serial8250_handle_irq

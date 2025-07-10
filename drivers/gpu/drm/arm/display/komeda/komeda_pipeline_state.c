@@ -259,7 +259,7 @@ komeda_component_get_avail_scaler(struct komeda_component *c,
 	u32 avail_scalers;
 
 	pipe_st = komeda_pipeline_get_state(c->pipeline, state);
-	if (!pipe_st)
+	if (IS_ERR_OR_NULL(pipe_st))
 		return NULL;
 
 	avail_scalers = (pipe_st->active_comps & KOMEDA_PIPELINE_SCALERS) ^
@@ -704,10 +704,10 @@ komeda_compiz_set_input(struct komeda_compiz *compiz,
 	cin->layer_alpha = dflow->layer_alpha;
 
 	old_st = komeda_component_get_old_state(&compiz->base, drm_st);
-	WARN_ON(!old_st);
 
 	/* compare with old to check if this input has been changed */
-	if (memcmp(&(to_compiz_st(old_st)->cins[idx]), cin, sizeof(*cin)))
+	if (WARN_ON(!old_st) ||
+	    memcmp(&(to_compiz_st(old_st)->cins[idx]), cin, sizeof(*cin)))
 		c_st->changed_active_inputs |= BIT(idx);
 
 	komeda_component_add_input(c_st, &dflow->input, idx);
@@ -1274,7 +1274,7 @@ int komeda_release_unclaimed_resources(struct komeda_pipeline *pipe,
 
 }
 
-/* Since standalong disabled components must be disabled separately and in the
+/* Since standalone disabled components must be disabled separately and in the
  * last, So a complete disable operation may needs to call pipeline_disable
  * twice (two phase disabling).
  * Phase 1: disable the common components, flush it.

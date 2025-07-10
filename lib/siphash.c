@@ -1,6 +1,5 @@
-/* Copyright (C) 2016 Jason A. Donenfeld <Jason@zx2c4.com>. All Rights Reserved.
- *
- * This file is provided under a dual BSD/GPLv2 license.
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause)
+/* Copyright (C) 2016-2022 Jason A. Donenfeld <Jason@zx2c4.com>. All Rights Reserved.
  *
  * SipHash: a fast short-input PRF
  * https://131002.net/siphash/
@@ -63,11 +62,11 @@ u64 __siphash_aligned(const void *data, size_t len, const siphash_key_t *key)
 						  bytemask_from_count(left)));
 #else
 	switch (left) {
-	case 7: b |= ((u64)end[6]) << 48; /* fall through */
-	case 6: b |= ((u64)end[5]) << 40; /* fall through */
-	case 5: b |= ((u64)end[4]) << 32; /* fall through */
+	case 7: b |= ((u64)end[6]) << 48; fallthrough;
+	case 6: b |= ((u64)end[5]) << 40; fallthrough;
+	case 5: b |= ((u64)end[4]) << 32; fallthrough;
 	case 4: b |= le32_to_cpup(data); break;
-	case 3: b |= ((u64)end[2]) << 16; /* fall through */
+	case 3: b |= ((u64)end[2]) << 16; fallthrough;
 	case 2: b |= le16_to_cpup(data); break;
 	case 1: b |= end[0];
 	}
@@ -96,11 +95,11 @@ u64 __siphash_unaligned(const void *data, size_t len, const siphash_key_t *key)
 						  bytemask_from_count(left)));
 #else
 	switch (left) {
-	case 7: b |= ((u64)end[6]) << 48; /* fall through */
-	case 6: b |= ((u64)end[5]) << 40; /* fall through */
-	case 5: b |= ((u64)end[4]) << 32; /* fall through */
+	case 7: b |= ((u64)end[6]) << 48; fallthrough;
+	case 6: b |= ((u64)end[5]) << 40; fallthrough;
+	case 5: b |= ((u64)end[4]) << 32; fallthrough;
 	case 4: b |= get_unaligned_le32(end); break;
-	case 3: b |= ((u64)end[2]) << 16; /* fall through */
+	case 3: b |= ((u64)end[2]) << 16; fallthrough;
 	case 2: b |= get_unaligned_le16(end); break;
 	case 1: b |= end[0];
 	}
@@ -263,11 +262,11 @@ u32 __hsiphash_aligned(const void *data, size_t len, const hsiphash_key_t *key)
 						  bytemask_from_count(left)));
 #else
 	switch (left) {
-	case 7: b |= ((u64)end[6]) << 48; /* fall through */
-	case 6: b |= ((u64)end[5]) << 40; /* fall through */
-	case 5: b |= ((u64)end[4]) << 32; /* fall through */
+	case 7: b |= ((u64)end[6]) << 48; fallthrough;
+	case 6: b |= ((u64)end[5]) << 40; fallthrough;
+	case 5: b |= ((u64)end[4]) << 32; fallthrough;
 	case 4: b |= le32_to_cpup(data); break;
-	case 3: b |= ((u64)end[2]) << 16; /* fall through */
+	case 3: b |= ((u64)end[2]) << 16; fallthrough;
 	case 2: b |= le16_to_cpup(data); break;
 	case 1: b |= end[0];
 	}
@@ -296,11 +295,11 @@ u32 __hsiphash_unaligned(const void *data, size_t len,
 						  bytemask_from_count(left)));
 #else
 	switch (left) {
-	case 7: b |= ((u64)end[6]) << 48; /* fall through */
-	case 6: b |= ((u64)end[5]) << 40; /* fall through */
-	case 5: b |= ((u64)end[4]) << 32; /* fall through */
+	case 7: b |= ((u64)end[6]) << 48; fallthrough;
+	case 6: b |= ((u64)end[5]) << 40; fallthrough;
+	case 5: b |= ((u64)end[4]) << 32; fallthrough;
 	case 4: b |= get_unaligned_le32(end); break;
-	case 3: b |= ((u64)end[2]) << 16; /* fall through */
+	case 3: b |= ((u64)end[2]) << 16; fallthrough;
 	case 2: b |= get_unaligned_le16(end); break;
 	case 1: b |= end[0];
 	}
@@ -420,7 +419,7 @@ u32 __hsiphash_aligned(const void *data, size_t len, const hsiphash_key_t *key)
 		v0 ^= m;
 	}
 	switch (left) {
-	case 3: b |= ((u32)end[2]) << 16; /* fall through */
+	case 3: b |= ((u32)end[2]) << 16; fallthrough;
 	case 2: b |= le16_to_cpup(data); break;
 	case 1: b |= end[0];
 	}
@@ -443,7 +442,7 @@ u32 __hsiphash_unaligned(const void *data, size_t len,
 		v0 ^= m;
 	}
 	switch (left) {
-	case 3: b |= ((u32)end[2]) << 16; /* fall through */
+	case 3: b |= ((u32)end[2]) << 16; fallthrough;
 	case 2: b |= get_unaligned_le16(end); break;
 	case 1: b |= end[0];
 	}

@@ -55,7 +55,7 @@
 #include <crypto/drbg.h>
 #include <crypto/hash.h>
 #include <crypto/rng.h>
-#include <crypto/sha.h>
+#include <crypto/sha2.h>
 #include <crypto/skcipher.h>
 
 #include "fips140-module.h"

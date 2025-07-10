@@ -43,7 +43,7 @@ struct ep11keyblob {
 /* check ep11 key magic to find out if this is an ep11 key blob */
 static inline bool is_ep11_keyblob(const u8 *key)
 {
-	struct ep11keyblob *kb = (struct ep11keyblob *) key;
+	struct ep11keyblob *kb = (struct ep11keyblob *)key;
 
 	return (kb->version == EP11_STRUCT_MAGIC);
 }
@@ -107,13 +107,14 @@ int ep11_get_domain_info(u16 card, u16 domain, struct ep11_domain_info *info);
  * Generate (random) EP11 AES secure key.
  */
 int ep11_genaeskey(u16 card, u16 domain, u32 keybitsize, u32 keygenflags,
-		   u8 *keybuf, size_t *keybufsize);
+		   u8 *keybuf, size_t *keybufsize, u32 keybufver);
 
 /*
  * Generate EP11 AES secure key with given clear key value.
  */
 int ep11_clr2keyblob(u16 cardnr, u16 domain, u32 keybitsize, u32 keygenflags,
-		     const u8 *clrkey, u8 *keybuf, size_t *keybufsize);
+		     const u8 *clrkey, u8 *keybuf, size_t *keybufsize,
+		     u32 keytype);
 
 /*
  * Build a list of ep11 apqns meeting the following constrains:

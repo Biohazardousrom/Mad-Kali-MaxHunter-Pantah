@@ -222,12 +222,6 @@ config USB_F_ACC
 config USB_F_AUDIO_SRC
 	tristate
 
-config USB_F_DM
-	tristate
-
-config USB_F_ETR_MIU
-	tristate
-
 # this first set of drivers all depend on bulk-capable hardware.
 
 config USB_CONFIGFS
@@ -260,7 +254,7 @@ config USB_CONFIGFS_SERIAL
 	  The function talks to the Linux-USB generic serial driver.
 
 config USB_CONFIGFS_ACM
-	tristate "Abstract Control Model (CDC ACM)"
+	bool "Abstract Control Model (CDC ACM)"
 	depends on USB_CONFIGFS
 	depends on TTY
 	select USB_U_SERIAL
@@ -314,7 +308,7 @@ config USB_CONFIGFS_ECM_SUBSET
 	  a simple CDC subset is used, placing fewer demands on USB.
 
 config USB_CONFIGFS_RNDIS
-	tristate "RNDIS"
+	bool "RNDIS"
 	depends on USB_CONFIGFS
 	depends on NET
 	select USB_U_ETHER
@@ -390,14 +384,6 @@ config USB_CONFIGFS_F_FS
 	  of composite gadgets such that some of the functions are
 	  implemented in kernel space (for instance Ethernet, serial or
 	  mass storage) and other are implemented in user space.
-
-config USB_CONFIGFS_F_DM
-	tristate "DM gadget"
-	depends on USB_CONFIGFS
-	select USB_F_DM
-	select USB_U_SERIAL
-	help
-	  USB gadget DM(Diagnosis Monitor) support
 
 config USB_CONFIGFS_F_ACC
 	bool "Accessory gadget"
@@ -493,7 +479,7 @@ config USB_CONFIGFS_F_HID
 config USB_CONFIGFS_F_UVC
 	bool "USB Webcam function"
 	depends on USB_CONFIGFS
-	depends on VIDEO_V4L2
+	depends on VIDEO_DEV
 	depends on VIDEO_DEV
 	select VIDEOBUF2_DMA_SG
 	select VIDEOBUF2_VMALLOC
@@ -530,16 +516,6 @@ config USB_CONFIGFS_F_TCM
 	  interface 0 (primary) and UAS is on alternative interface 1.
 	  Both protocols can work on USB2.0 and USB3.0.
 	  UAS utilizes the USB 3.0 feature called streams support.
-
-config USB_CONFIGFS_F_ETR_MIU
-	tristate "ETR_MIU"
-	depends on USB_CONFIGFS
-	select USB_F_ETR_MIU
-	help
-	  The ETR_MIU function enables sending trace data from Coresight ETR to USB
-	  via ETR_MIU. The function has an interface with two alternate settings.
-	  Alt0 setting is idle mode. Alt1 setting is data transfer mode. USB host
-	  must set Alt1 before attempting to download trace data.
 
 source "drivers/usb/gadget/legacy/Kconfig"
 

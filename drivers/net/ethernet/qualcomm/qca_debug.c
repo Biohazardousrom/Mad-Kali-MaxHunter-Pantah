@@ -64,6 +64,7 @@ static const char qcaspi_gstrings_stats[][ETH_GSTRING_LEN] = {
 	"SPI errors",
 	"Write verify errors",
 	"Buffer available errors",
+	"Bad signature",
 };
 
 #ifdef CONFIG_DEBUG_FS
@@ -110,10 +111,8 @@ qcaspi_info_show(struct seq_file *s, void *what)
 
 	seq_printf(s, "IRQ              : %d\n",
 		   qca->spi_dev->irq);
-	seq_printf(s, "INTR REQ         : %u\n",
-		   qca->intr_req);
-	seq_printf(s, "INTR SVC         : %u\n",
-		   qca->intr_svc);
+	seq_printf(s, "INTR             : %lx\n",
+		   qca->intr);
 
 	seq_printf(s, "SPI max speed    : %lu\n",
 		   (unsigned long)qca->spi_dev->max_speed_hz);
@@ -165,10 +164,10 @@ qcaspi_get_drvinfo(struct net_device *dev, struct ethtool_drvinfo *p)
 {
 	struct qcaspi *qca = netdev_priv(dev);
 
-	strlcpy(p->driver, QCASPI_DRV_NAME, sizeof(p->driver));
-	strlcpy(p->version, QCASPI_DRV_VERSION, sizeof(p->version));
-	strlcpy(p->fw_version, "QCA7000", sizeof(p->fw_version));
-	strlcpy(p->bus_info, dev_name(&qca->spi_dev->dev),
+	strscpy(p->driver, QCASPI_DRV_NAME, sizeof(p->driver));
+	strscpy(p->version, QCASPI_DRV_VERSION, sizeof(p->version));
+	strscpy(p->fw_version, "QCA7000", sizeof(p->fw_version));
+	strscpy(p->bus_info, dev_name(&qca->spi_dev->dev),
 		sizeof(p->bus_info));
 }
 
@@ -247,7 +246,9 @@ qcaspi_get_regs(struct net_device *dev, struct ethtool_regs *regs, void *p)
 }
 
 static void
-qcaspi_get_ringparam(struct net_device *dev, struct ethtool_ringparam *ring)
+qcaspi_get_ringparam(struct net_device *dev, struct ethtool_ringparam *ring,
+		     struct kernel_ethtool_ringparam *kernel_ring,
+		     struct netlink_ext_ack *extack)
 {
 	struct qcaspi *qca = netdev_priv(dev);
 
@@ -258,7 +259,9 @@ qcaspi_get_ringparam(struct net_device *dev, struct ethtool_ringparam *ring)
 }
 
 static int
-qcaspi_set_ringparam(struct net_device *dev, struct ethtool_ringparam *ring)
+qcaspi_set_ringparam(struct net_device *dev, struct ethtool_ringparam *ring,
+		     struct kernel_ethtool_ringparam *kernel_ring,
+		     struct netlink_ext_ack *extack)
 {
 	struct qcaspi *qca = netdev_priv(dev);
 

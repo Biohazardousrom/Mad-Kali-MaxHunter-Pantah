@@ -7,6 +7,7 @@
 
 #include <linux/types.h>
 #include <linux/device.h>
+#include <linux/uaccess.h>
 #include <linux/termios.h>
 #include <linux/delay.h>
 
@@ -165,20 +166,8 @@ int serdev_device_add(struct serdev_device *);
 void serdev_device_remove(struct serdev_device *);
 
 struct serdev_controller *serdev_controller_alloc(struct device *, size_t);
-int serdev_controller_add_platform(struct serdev_controller *, bool);
+int serdev_controller_add(struct serdev_controller *);
 void serdev_controller_remove(struct serdev_controller *);
-
-/**
- * serdev_controller_add() - Add an serdev controller
- * @ctrl:	controller to be registered.
- *
- * Register a controller previously allocated via serdev_controller_alloc() with
- * the serdev core.
- */
-static inline int serdev_controller_add(struct serdev_controller *ctrl)
-{
-	return serdev_controller_add_platform(ctrl, false);
-}
 
 static inline void serdev_controller_write_wakeup(struct serdev_controller *ctrl)
 {
@@ -338,5 +327,19 @@ static inline int serdev_tty_port_unregister(struct tty_port *port)
 	return -ENODEV;
 }
 #endif /* CONFIG_SERIAL_DEV_CTRL_TTYPORT */
+
+struct acpi_resource;
+struct acpi_resource_uart_serialbus;
+
+#ifdef CONFIG_ACPI
+bool serdev_acpi_get_uart_resource(struct acpi_resource *ares,
+				   struct acpi_resource_uart_serialbus **uart);
+#else
+static inline bool serdev_acpi_get_uart_resource(struct acpi_resource *ares,
+						 struct acpi_resource_uart_serialbus **uart)
+{
+	return false;
+}
+#endif /* CONFIG_ACPI */
 
 #endif /*_LINUX_SERDEV_H */

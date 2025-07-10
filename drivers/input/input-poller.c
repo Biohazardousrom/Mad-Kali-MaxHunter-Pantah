@@ -31,7 +31,7 @@ static void input_dev_poller_queue_work(struct input_dev_poller *poller)
 	if (delay >= HZ)
 		delay = round_jiffies_relative(delay);
 
-	queue_delayed_work(system_freezable_power_efficient_wq, &poller->work, delay);
+	queue_delayed_work(system_freezable_wq, &poller->work, delay);
 }
 
 static void input_dev_poller_work(struct work_struct *work)
@@ -166,7 +166,7 @@ static ssize_t input_dev_set_poll_interval(struct device *dev,
 
 	poller->poll_interval = interval;
 
-	if (input->users) {
+	if (input_device_enabled(input)) {
 		cancel_delayed_work_sync(&poller->work);
 		if (poller->poll_interval > 0)
 			input_dev_poller_queue_work(poller);

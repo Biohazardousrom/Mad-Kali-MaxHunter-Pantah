@@ -28,7 +28,7 @@
 u8 debug_monitors_arch(void)
 {
 	return cpuid_feature_extract_unsigned_field(read_sanitised_ftr_reg(SYS_ID_AA64DFR0_EL1),
-						ID_AA64DFR0_DEBUGVER_SHIFT);
+						ID_AA64DFR0_EL1_DebugVer_SHIFT);
 }
 
 /*
@@ -53,7 +53,7 @@ NOKPROBE_SYMBOL(mdscr_read);
  * Allow root to disable self-hosted debug from userspace.
  * This is useful if you want to connect an external JTAG debugger.
  */
-static bool debug_enabled;
+static bool debug_enabled = true;
 
 static int create_debug_debugfs_entry(void)
 {
@@ -202,7 +202,7 @@ void unregister_kernel_step_hook(struct step_hook *hook)
  * So we call all the registered handlers, until the right handler is
  * found which returns zero.
  */
-static int call_step_hook(struct pt_regs *regs, unsigned int esr)
+static int call_step_hook(struct pt_regs *regs, unsigned long esr)
 {
 	struct step_hook *hook;
 	struct list_head *list;
@@ -238,7 +238,7 @@ static void send_user_sigtrap(int si_code)
 			      "User debug trap");
 }
 
-static int single_step_handler(unsigned long unused, unsigned int esr,
+static int single_step_handler(unsigned long unused, unsigned long esr,
 			       struct pt_regs *regs)
 {
 	bool handler_found = false;
@@ -303,11 +303,11 @@ void unregister_kernel_break_hook(struct break_hook *hook)
 }
 EXPORT_SYMBOL_GPL(unregister_kernel_break_hook);
 
-static int call_break_hook(struct pt_regs *regs, unsigned int esr)
+static int call_break_hook(struct pt_regs *regs, unsigned long esr)
 {
 	struct break_hook *hook;
 	struct list_head *list;
-	int (*fn)(struct pt_regs *regs, unsigned int esr) = NULL;
+	int (*fn)(struct pt_regs *regs, unsigned long esr) = NULL;
 
 	list = user_mode(regs) ? &user_break_hook : &kernel_break_hook;
 
@@ -316,7 +316,7 @@ static int call_break_hook(struct pt_regs *regs, unsigned int esr)
 	 * entirely not preemptible, and we can use rcu list safely here.
 	 */
 	list_for_each_entry_rcu(hook, list, node) {
-		unsigned int comment = esr & ESR_ELx_BRK64_ISS_COMMENT_MASK;
+		unsigned long comment = esr & ESR_ELx_BRK64_ISS_COMMENT_MASK;
 
 		if ((comment & ~hook->mask) == hook->imm)
 			fn = hook->fn;
@@ -326,7 +326,7 @@ static int call_break_hook(struct pt_regs *regs, unsigned int esr)
 }
 NOKPROBE_SYMBOL(call_break_hook);
 
-static int brk_handler(unsigned long unused, unsigned int esr,
+static int brk_handler(unsigned long unused, unsigned long esr,
 		       struct pt_regs *regs)
 {
 	if (call_break_hook(regs, esr) == DBG_HOOK_HANDLED)

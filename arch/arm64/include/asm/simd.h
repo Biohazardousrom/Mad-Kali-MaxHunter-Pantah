@@ -35,7 +35,7 @@ static __must_check inline bool may_use_simd(void)
 	 * migrated, and if it's clear we cannot be migrated to a CPU
 	 * where it is set.
 	 */
-	return !in_irq() && !irqs_disabled() && !in_nmi() &&
+	return !in_hardirq() && !irqs_disabled() && !in_nmi() &&
 	       !this_cpu_read(fpsimd_context_busy);
 }
 

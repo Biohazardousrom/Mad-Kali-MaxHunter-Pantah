@@ -20,7 +20,7 @@
  *   coders, etc.
  *
  *   Such devices often require big memory buffers (a full HD frame
- *   is, for instance, more then 2 mega pixels large, i.e. more than 6
+ *   is, for instance, more than 2 mega pixels large, i.e. more than 6
  *   MB of memory), which makes mechanisms such as kmalloc() or
  *   alloc_page() ineffective.
  *
@@ -261,8 +261,7 @@ struct page *dma_alloc_from_contiguous(struct device *dev, size_t count,
 	if (align > CONFIG_CMA_ALIGNMENT)
 		align = CONFIG_CMA_ALIGNMENT;
 
-	return cma_alloc(dev_get_cma_area(dev), count, align, GFP_KERNEL |
-			(no_warn ? __GFP_NOWARN : 0));
+	return cma_alloc(dev_get_cma_area(dev), count, align, no_warn);
 }
 
 /**
@@ -285,8 +284,7 @@ static struct page *cma_alloc_aligned(struct cma *cma, size_t size, gfp_t gfp)
 {
 	unsigned int align = min(get_order(size), CONFIG_CMA_ALIGNMENT);
 
-	return cma_alloc(cma, size >> PAGE_SHIFT, align,
-				GFP_KERNEL | (gfp & __GFP_NOWARN));
+	return cma_alloc(cma, size >> PAGE_SHIFT, align, gfp & __GFP_NOWARN);
 }
 
 /**
@@ -402,8 +400,6 @@ static const struct reserved_mem_ops rmem_cma_ops = {
 
 static int __init rmem_cma_setup(struct reserved_mem *rmem)
 {
-	phys_addr_t align = PAGE_SIZE << max(MAX_ORDER - 1, pageblock_order);
-	phys_addr_t mask = align - 1;
 	unsigned long node = rmem->fdt_node;
 	bool default_cma = of_get_flat_dt_prop(node, "linux,cma-default", NULL);
 	struct cma *cma;
@@ -419,7 +415,7 @@ static int __init rmem_cma_setup(struct reserved_mem *rmem)
 	    of_get_flat_dt_prop(node, "no-map", NULL))
 		return -EINVAL;
 
-	if ((rmem->base & mask) || (rmem->size & mask)) {
+	if (!IS_ALIGNED(rmem->base | rmem->size, CMA_MIN_ALIGNMENT_BYTES)) {
 		pr_err("Reserved memory: incorrect alignment of CMA region\n");
 		return -EINVAL;
 	}

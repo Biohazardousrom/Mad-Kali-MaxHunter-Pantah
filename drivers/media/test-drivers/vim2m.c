@@ -2,7 +2,7 @@
 /*
  * A virtual v4l2-mem2mem example device.
  *
- * This is a virtual device driver for testing mem-to-mem videobuf framework.
+ * This is a virtual device driver for testing mem-to-mem vb2 framework.
  * It simulates a device that uses memory buffers for both source and
  * destination, processes the data and issues an "irq" (simulated by a delayed
  * workqueue).
@@ -12,11 +12,6 @@
  * Copyright (c) 2009-2010 Samsung Electronics Co., Ltd.
  * Pawel Osciak, <pawel@osciak.com>
  * Marek Szyprowski, <m.szyprowski@samsung.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2 of the
- * License, or (at your option) any later version
  */
 #include <linux/module.h>
 #include <linux/delay.h>
@@ -623,11 +618,6 @@ static void device_work(struct work_struct *w)
 	struct vb2_v4l2_buffer *src_vb, *dst_vb;
 
 	curr_ctx = container_of(w, struct vim2m_ctx, work_run.work);
-
-	if (!curr_ctx) {
-		pr_err("Instance released before the end of transaction\n");
-		return;
-	}
 
 	vim2m_dev = curr_ctx->dev;
 

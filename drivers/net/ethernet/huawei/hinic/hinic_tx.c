@@ -4,6 +4,7 @@
  * Copyright(c) 2017 Huawei Technologies Co., Ltd
  */
 
+#include <linux/if_vlan.h>
 #include <linux/kernel.h>
 #include <linux/netdevice.h>
 #include <linux/u64_stats_sync.h>
@@ -73,7 +74,7 @@ enum hinic_offload_type {
  * hinic_txq_clean_stats - Clean the statistics of specific queue
  * @txq: Logical Tx Queue
  **/
-void hinic_txq_clean_stats(struct hinic_txq *txq)
+static void hinic_txq_clean_stats(struct hinic_txq *txq)
 {
 	struct hinic_txq_stats *txq_stats = &txq->txq_stats;
 
@@ -375,6 +376,7 @@ static int offload_csum(struct hinic_sq_task *task, u32 *queue_info,
 		} else if (ip.v4->version == 6) {
 			unsigned char *exthdr;
 			__be16 frag_off;
+
 			l3_type = IPV6_PKT;
 			tunnel_type = TUNNEL_UDP_CSUM;
 			exthdr = ip.hdr + sizeof(*ip.v6);
@@ -528,7 +530,7 @@ netdev_tx_t hinic_lb_xmit_frame(struct sk_buff *skb, struct net_device *netdev)
 	}
 
 process_sq_wqe:
-	hinic_sq_prepare_wqe(txq->sq, prod_idx, sq_wqe, txq->sges, nr_sges);
+	hinic_sq_prepare_wqe(txq->sq, sq_wqe, txq->sges, nr_sges);
 	hinic_sq_write_wqe(txq->sq, prod_idx, sq_wqe, skb, wqe_size);
 
 flush_skbs:
@@ -612,7 +614,7 @@ netdev_tx_t hinic_xmit_frame(struct sk_buff *skb, struct net_device *netdev)
 	}
 
 process_sq_wqe:
-	hinic_sq_prepare_wqe(txq->sq, prod_idx, sq_wqe, txq->sges, nr_sges);
+	hinic_sq_prepare_wqe(txq->sq, sq_wqe, txq->sges, nr_sges);
 
 	err = hinic_tx_offload(skb, &sq_wqe->task, &sq_wqe->ctrl.queue_info);
 	if (err)
@@ -657,7 +659,7 @@ static void tx_free_skb(struct hinic_dev *nic_dev, struct sk_buff *skb,
 }
 
 /**
- * free_all_rx_skbs - free all skbs in tx queue
+ * free_all_tx_skbs - free all skbs in tx queue
  * @txq: tx queue
  **/
 static void free_all_tx_skbs(struct hinic_txq *txq)
@@ -714,7 +716,7 @@ static int free_tx_poll(struct napi_struct *napi, int budget)
 
 		/* Reading a WQEBB to get real WQE size and consumer index. */
 		sq_wqe = hinic_sq_read_wqebb(sq, &skb, &wqe_size, &sw_ci);
-		if ((!sq_wqe) ||
+		if (!sq_wqe ||
 		    (((hw_ci - sw_ci) & wq->mask) * wq->wqebb_size < wqe_size))
 			break;
 
@@ -805,7 +807,8 @@ static int tx_request_irq(struct hinic_txq *txq)
 
 	qp = container_of(sq, struct hinic_qp, sq);
 
-	netif_napi_add(txq->netdev, &txq->napi, free_tx_poll, nic_dev->tx_weight);
+	netif_napi_add_weight(txq->netdev, &txq->napi, free_tx_poll,
+			      nic_dev->tx_weight);
 
 	hinic_hwdev_msix_set(nic_dev->hwdev, sq->msix_entry,
 			     TX_IRQ_NO_PENDING, TX_IRQ_NO_COALESC,

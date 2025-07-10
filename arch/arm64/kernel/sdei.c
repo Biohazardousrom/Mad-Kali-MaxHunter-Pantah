@@ -39,9 +39,6 @@ DEFINE_PER_CPU(unsigned long *, sdei_stack_normal_ptr);
 DEFINE_PER_CPU(unsigned long *, sdei_stack_critical_ptr);
 #endif
 
-DEFINE_PER_CPU(struct sdei_registered_event *, sdei_active_normal_event);
-DEFINE_PER_CPU(struct sdei_registered_event *, sdei_active_critical_event);
-
 DECLARE_PER_CPU(unsigned long *, sdei_shadow_call_stack_normal_ptr);
 DECLARE_PER_CPU(unsigned long *, sdei_shadow_call_stack_critical_ptr);
 
@@ -49,6 +46,9 @@ DECLARE_PER_CPU(unsigned long *, sdei_shadow_call_stack_critical_ptr);
 DEFINE_PER_CPU(unsigned long *, sdei_shadow_call_stack_normal_ptr);
 DEFINE_PER_CPU(unsigned long *, sdei_shadow_call_stack_critical_ptr);
 #endif
+
+DEFINE_PER_CPU(struct sdei_registered_event *, sdei_active_normal_event);
+DEFINE_PER_CPU(struct sdei_registered_event *, sdei_active_critical_event);
 
 static void _free_sdei_stack(unsigned long * __percpu *ptr, int cpu)
 {
@@ -147,7 +147,7 @@ static int init_sdei_scs(void)
 	int cpu;
 	int err = 0;
 
-	if (!IS_ENABLED(CONFIG_SHADOW_CALL_STACK))
+	if (!scs_is_enabled())
 		return 0;
 
 	for_each_possible_cpu(cpu) {
@@ -165,38 +165,6 @@ static int init_sdei_scs(void)
 	return err;
 }
 
-static bool on_sdei_normal_stack(unsigned long sp, unsigned long size,
-				 struct stack_info *info)
-{
-	unsigned long low = (unsigned long)raw_cpu_read(sdei_stack_normal_ptr);
-	unsigned long high = low + SDEI_STACK_SIZE;
-
-	return on_stack(sp, size, low, high, STACK_TYPE_SDEI_NORMAL, info);
-}
-
-static bool on_sdei_critical_stack(unsigned long sp, unsigned long size,
-				   struct stack_info *info)
-{
-	unsigned long low = (unsigned long)raw_cpu_read(sdei_stack_critical_ptr);
-	unsigned long high = low + SDEI_STACK_SIZE;
-
-	return on_stack(sp, size, low, high, STACK_TYPE_SDEI_CRITICAL, info);
-}
-
-bool _on_sdei_stack(unsigned long sp, unsigned long size, struct stack_info *info)
-{
-	if (!IS_ENABLED(CONFIG_VMAP_STACK))
-		return false;
-
-	if (on_sdei_critical_stack(sp, size, info))
-		return true;
-
-	if (on_sdei_normal_stack(sp, size, info))
-		return true;
-
-	return false;
-}
-
 unsigned long sdei_arch_get_entry_point(int conduit)
 {
 	/*
@@ -205,7 +173,7 @@ unsigned long sdei_arch_get_entry_point(int conduit)
 	 * dropped to EL1 because we don't support VHE, then we can't support
 	 * SDEI.
 	 */
-	if (is_hyp_mode_available() && !is_kernel_in_hyp_mode()) {
+	if (is_hyp_nvhe()) {
 		pr_err("Not supported on this hardware/boot configuration\n");
 		goto out_err;
 	}
@@ -236,13 +204,13 @@ out_err:
 }
 
 /*
- * __sdei_handler() returns one of:
+ * do_sdei_event() returns one of:
  *  SDEI_EV_HANDLED -  success, return to the interrupted context.
  *  SDEI_EV_FAILED  -  failure, return this error code to firmare.
  *  virtual-address -  success, return to this address.
  */
-static __kprobes unsigned long _sdei_handler(struct pt_regs *regs,
-					     struct sdei_registered_event *arg)
+unsigned long __kprobes do_sdei_event(struct pt_regs *regs,
+				      struct sdei_registered_event *arg)
 {
 	u32 mode;
 	int i, err = 0;
@@ -259,12 +227,6 @@ static __kprobes unsigned long _sdei_handler(struct pt_regs *regs,
 		/* from within the handler, this call always succeeds */
 		sdei_api_event_context(i, &regs->regs[i]);
 	}
-
-	/*
-	 * We didn't take an exception to get here, set PAN. UAO will be cleared
-	 * by sdei_event_handler()s force_uaccess_begin() call.
-	 */
-	__uaccess_enable_hw_pan();
 
 	err = sdei_event_handler(regs, arg);
 	if (err)
@@ -302,19 +264,4 @@ static __kprobes unsigned long _sdei_handler(struct pt_regs *regs,
 		return vbar + 0x680;
 
 	return vbar + 0x480;
-}
-
-
-asmlinkage noinstr unsigned long
-__sdei_handler(struct pt_regs *regs, struct sdei_registered_event *arg)
-{
-	unsigned long ret;
-
-	arm64_enter_nmi(regs);
-
-	ret = _sdei_handler(regs, arg);
-
-	arm64_exit_nmi(regs);
-
-	return ret;
 }

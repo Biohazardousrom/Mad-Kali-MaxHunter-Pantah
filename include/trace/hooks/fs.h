@@ -9,6 +9,7 @@
 #define _TRACE_HOOK_FS_H
 
 #include <trace/hooks/vendor_hooks.h>
+
 DECLARE_HOOK(android_vh_ep_create_wakeup_source,
 	TP_PROTO(char *name, int len),
 	TP_ARGS(name, len));

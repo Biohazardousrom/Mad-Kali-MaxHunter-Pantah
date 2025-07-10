@@ -17,7 +17,7 @@
 #include <linux/syscalls.h>
 #include <linux/mount.h>
 #include <linux/device.h>
-#include <linux/genhd.h>
+#include <linux/blkdev.h>
 #include <linux/namei.h>
 #include <linux/fs.h>
 #include <linux/shmem_fs.h>
@@ -28,6 +28,12 @@
 #include <linux/init_syscalls.h>
 #include <uapi/linux/mount.h>
 #include "base.h"
+
+#ifdef CONFIG_DEVTMPFS_SAFE
+#define DEVTMPFS_MFLAGS       (MS_SILENT | MS_NOEXEC | MS_NOSUID)
+#else
+#define DEVTMPFS_MFLAGS       (MS_SILENT)
+#endif
 
 static struct task_struct *thread;
 
@@ -75,10 +81,8 @@ static struct file_system_type internal_fs_type = {
 	.name = "devtmpfs",
 #ifdef CONFIG_TMPFS
 	.init_fs_context = shmem_init_fs_context,
-	.parameters	= shmem_fs_parameters,
 #else
 	.init_fs_context = ramfs_init_fs_context,
-	.parameters	= ramfs_fs_parameters,
 #endif
 	.kill_sb = kill_litter_super,
 };
@@ -169,7 +173,7 @@ static int dev_mkdir(const char *name, umode_t mode)
 	if (IS_ERR(dentry))
 		return PTR_ERR(dentry);
 
-	err = vfs_mkdir(d_inode(path.dentry), dentry, mode);
+	err = vfs_mkdir(&init_user_ns, d_inode(path.dentry), dentry, mode);
 	if (!err)
 		/* mark as kernel-created inode */
 		d_inode(dentry)->i_private = &thread;
@@ -219,7 +223,8 @@ static int handle_create(const char *nodename, umode_t mode, kuid_t uid,
 	if (IS_ERR(dentry))
 		return PTR_ERR(dentry);
 
-	err = vfs_mknod(d_inode(path.dentry), dentry, mode, dev->devt);
+	err = vfs_mknod(&init_user_ns, d_inode(path.dentry), dentry, mode,
+			dev->devt);
 	if (!err) {
 		struct iattr newattrs;
 
@@ -228,7 +233,7 @@ static int handle_create(const char *nodename, umode_t mode, kuid_t uid,
 		newattrs.ia_gid = gid;
 		newattrs.ia_valid = ATTR_MODE|ATTR_UID|ATTR_GID;
 		inode_lock(d_inode(dentry));
-		notify_change(dentry, &newattrs, NULL);
+		notify_change(&init_user_ns, dentry, &newattrs, NULL);
 		inode_unlock(d_inode(dentry));
 
 		/* mark as kernel-created inode */
@@ -249,7 +254,8 @@ static int dev_rmdir(const char *name)
 		return PTR_ERR(dentry);
 	if (d_really_is_positive(dentry)) {
 		if (d_inode(dentry)->i_private == &thread)
-			err = vfs_rmdir(d_inode(parent.dentry), dentry);
+			err = vfs_rmdir(&init_user_ns, d_inode(parent.dentry),
+					dentry);
 		else
 			err = -EPERM;
 	} else {
@@ -335,9 +341,10 @@ static int handle_remove(const char *nodename, struct device *dev)
 			newattrs.ia_valid =
 				ATTR_UID|ATTR_GID|ATTR_MODE;
 			inode_lock(d_inode(dentry));
-			notify_change(dentry, &newattrs, NULL);
+			notify_change(&init_user_ns, dentry, &newattrs, NULL);
 			inode_unlock(d_inode(dentry));
-			err = vfs_unlink(d_inode(parent.dentry), dentry, NULL);
+			err = vfs_unlink(&init_user_ns, d_inode(parent.dentry),
+					 dentry, NULL);
 			if (!err || err == -ENOENT)
 				deleted = 1;
 		}
@@ -367,7 +374,7 @@ int __init devtmpfs_mount(void)
 	if (!thread)
 		return 0;
 
-	err = init_mount("devtmpfs", "dev", "devtmpfs", MS_SILENT, NULL);
+	err = init_mount("devtmpfs", "dev", "devtmpfs", DEVTMPFS_MFLAGS, NULL);
 	if (err)
 		printk(KERN_INFO "devtmpfs: error mounting %i\n", err);
 	else
@@ -375,7 +382,7 @@ int __init devtmpfs_mount(void)
 	return err;
 }
 
-static DECLARE_COMPLETION(setup_done);
+static __initdata DECLARE_COMPLETION(setup_done);
 
 static int handle(const char *name, umode_t mode, kuid_t uid, kgid_t gid,
 		  struct device *dev)
@@ -409,14 +416,14 @@ static void __noreturn devtmpfs_work_loop(void)
 	}
 }
 
-static int __init devtmpfs_setup(void *p)
+static noinline int __init devtmpfs_setup(void *p)
 {
 	int err;
 
 	err = ksys_unshare(CLONE_NEWNS);
 	if (err)
 		goto out;
-	err = init_mount("devtmpfs", "/", "devtmpfs", MS_SILENT, NULL);
+	err = init_mount("devtmpfs", "/", "devtmpfs", DEVTMPFS_MFLAGS, NULL);
 	if (err)
 		goto out;
 	init_chdir("/.."); /* will traverse into overmounted root */
@@ -475,6 +482,7 @@ int __init devtmpfs_init(void)
 	if (err) {
 		printk(KERN_ERR "devtmpfs: unable to create devtmpfs %i\n", err);
 		unregister_filesystem(&dev_fs_type);
+		thread = NULL;
 		return err;
 	}
 

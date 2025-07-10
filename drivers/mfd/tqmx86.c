@@ -81,7 +81,7 @@ static struct i2c_board_info tqmx86_i2c_devices[] = {
 	},
 };
 
-static struct ocores_i2c_platform_data ocores_platfom_data = {
+static struct ocores_i2c_platform_data ocores_platform_data = {
 	.num_devices = ARRAY_SIZE(tqmx86_i2c_devices),
 	.devices = tqmx86_i2c_devices,
 };
@@ -89,8 +89,8 @@ static struct ocores_i2c_platform_data ocores_platfom_data = {
 static const struct mfd_cell tqmx86_i2c_soft_dev[] = {
 	{
 		.name = "ocores-i2c",
-		.platform_data = &ocores_platfom_data,
-		.pdata_size = sizeof(ocores_platfom_data),
+		.platform_data = &ocores_platform_data,
+		.pdata_size = sizeof(ocores_platform_data),
 		.resources = tqmx_i2c_soft_resources,
 		.num_resources = ARRAY_SIZE(tqmx_i2c_soft_resources),
 	},
@@ -147,7 +147,7 @@ static const char *tqmx86_board_id_to_name(u8 board_id, u8 sauc)
 	}
 }
 
-static int tqmx86_board_id_to_clk_rate(u8 board_id)
+static int tqmx86_board_id_to_clk_rate(struct device *dev, u8 board_id)
 {
 	switch (board_id) {
 	case TQMX86_REG_BOARD_ID_50UC:
@@ -168,7 +168,9 @@ static int tqmx86_board_id_to_clk_rate(u8 board_id)
 	case TQMX86_REG_BOARD_ID_E38C:
 		return 33000;
 	default:
-		return 0;
+		dev_warn(dev, "unknown board %d, assuming 24MHz LPC clock\n",
+			 board_id);
+		return 24000;
 	}
 }
 
@@ -235,7 +237,7 @@ static int tqmx86_probe(struct platform_device *pdev)
 		tqmx_gpio_resources[0].flags = 0;
 	}
 
-	ocores_platfom_data.clock_khz = tqmx86_board_id_to_clk_rate(board_id);
+	ocores_platform_data.clock_khz = tqmx86_board_id_to_clk_rate(dev, board_id);
 
 	if (i2c_det == TQMX86_REG_I2C_DETECT_SOFT) {
 		err = devm_mfd_add_devices(dev, PLATFORM_DEVID_NONE,
@@ -273,6 +275,14 @@ static const struct dmi_system_id tqmx86_dmi_table[] __initconst = {
 		.ident = "TQMX86",
 		.matches = {
 			DMI_MATCH(DMI_SYS_VENDOR, "TQ-Group"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "TQMx"),
+		},
+		.callback = tqmx86_create_platform_device,
+	},
+	{
+		.ident = "TQMX86",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "TQ-Systems"),
 			DMI_MATCH(DMI_PRODUCT_NAME, "TQMx"),
 		},
 		.callback = tqmx86_create_platform_device,

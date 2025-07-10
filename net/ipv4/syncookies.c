@@ -7,8 +7,6 @@
  */
 
 #include <linux/tcp.h>
-#include <linux/slab.h>
-#include <linux/random.h>
 #include <linux/siphash.h>
 #include <linux/kernel.h>
 #include <linux/export.h>
@@ -16,7 +14,7 @@
 #include <net/tcp.h>
 #include <net/route.h>
 
-static siphash_key_t syncookie_secret[2] __read_mostly;
+static siphash_aligned_key_t syncookie_secret[2];
 
 #define COOKIEBITS 24	/* Upper bits store count */
 #define COOKIEMASK (((__u32)1 << COOKIEBITS) - 1)
@@ -269,7 +267,7 @@ bool cookie_ecn_ok(const struct tcp_options_received *tcp_opt,
 	if (!ecn_ok)
 		return false;
 
-	if (net->ipv4.sysctl_tcp_ecn)
+	if (READ_ONCE(net->ipv4.sysctl_tcp_ecn))
 		return true;
 
 	return dst_feature(dst, RTAX_FEATURE_ECN);

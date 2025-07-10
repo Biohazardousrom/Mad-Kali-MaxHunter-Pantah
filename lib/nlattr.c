@@ -30,6 +30,8 @@ static const u8 nla_attr_len[NLA_TYPE_MAX+1] = {
 	[NLA_S16]	= sizeof(s16),
 	[NLA_S32]	= sizeof(s32),
 	[NLA_S64]	= sizeof(s64),
+	[NLA_BE16]	= sizeof(__be16),
+	[NLA_BE32]	= sizeof(__be32),
 };
 
 static const u8 nla_attr_minlen[NLA_TYPE_MAX+1] = {
@@ -43,6 +45,8 @@ static const u8 nla_attr_minlen[NLA_TYPE_MAX+1] = {
 	[NLA_S16]	= sizeof(s16),
 	[NLA_S32]	= sizeof(s32),
 	[NLA_S64]	= sizeof(s64),
+	[NLA_BE16]	= sizeof(__be16),
+	[NLA_BE32]	= sizeof(__be32),
 };
 
 /*
@@ -125,10 +129,12 @@ void nla_get_range_unsigned(const struct nla_policy *pt,
 		range->max = U8_MAX;
 		break;
 	case NLA_U16:
+	case NLA_BE16:
 	case NLA_BINARY:
 		range->max = U16_MAX;
 		break;
 	case NLA_U32:
+	case NLA_BE32:
 		range->max = U32_MAX;
 		break;
 	case NLA_U64:
@@ -179,11 +185,19 @@ static int nla_validate_range_unsigned(const struct nla_policy *pt,
 		value = nla_get_u32(nla);
 		break;
 	case NLA_U64:
+		value = nla_get_u64(nla);
+		break;
 	case NLA_MSECS:
 		value = nla_get_u64(nla);
 		break;
 	case NLA_BINARY:
 		value = nla_len(nla);
+		break;
+	case NLA_BE16:
+		value = ntohs(nla_get_be16(nla));
+		break;
+	case NLA_BE32:
+		value = ntohl(nla_get_be32(nla));
 		break;
 	default:
 		return -EINVAL;
@@ -312,6 +326,8 @@ static int nla_validate_int_range(const struct nla_policy *pt,
 	case NLA_U64:
 	case NLA_MSECS:
 	case NLA_BINARY:
+	case NLA_BE16:
+	case NLA_BE32:
 		return nla_validate_range_unsigned(pt, nla, extack, validate);
 	case NLA_S8:
 	case NLA_S16:
@@ -434,7 +450,7 @@ static int validate_nla(const struct nlattr *nla, int maxtype,
 			err = -EINVAL;
 			goto out_err;
 		}
-		/* fall through */
+		fallthrough;
 
 	case NLA_STRING:
 		if (attrlen < 1)
@@ -622,7 +638,7 @@ static int __nla_validate_parse(const struct nlattr *head, int len, int maxtype,
  * Validates all attributes in the specified attribute stream against the
  * specified policy. Validation depends on the validate flags passed, see
  * &enum netlink_validation for more details on that.
- * See documenation of struct nla_policy for more details.
+ * See documentation of struct nla_policy for more details.
  *
  * Returns 0 on success or a negative error code.
  */
@@ -636,7 +652,7 @@ int __nla_validate(const struct nlattr *head, int len, int maxtype,
 EXPORT_SYMBOL(__nla_validate);
 
 /**
- * nla_policy_len - Determin the max. length of a policy
+ * nla_policy_len - Determine the max. length of a policy
  * @policy: policy to use
  * @n: number of policies
  *
@@ -712,35 +728,47 @@ struct nlattr *nla_find(const struct nlattr *head, int len, int attrtype)
 EXPORT_SYMBOL(nla_find);
 
 /**
- * nla_strlcpy - Copy string attribute payload into a sized buffer
- * @dst: where to copy the string to
- * @nla: attribute to copy the string from
- * @dstsize: size of destination buffer
+ * nla_strscpy - Copy string attribute payload into a sized buffer
+ * @dst: Where to copy the string to.
+ * @nla: Attribute to copy the string from.
+ * @dstsize: Size of destination buffer.
  *
  * Copies at most dstsize - 1 bytes into the destination buffer.
- * The result is always a valid NUL-terminated string. Unlike
- * strlcpy the destination buffer is always padded out.
+ * Unlike strlcpy the destination buffer is always padded out.
  *
- * Returns the length of the source buffer.
+ * Return:
+ * * srclen - Returns @nla length (not including the trailing %NUL).
+ * * -E2BIG - If @dstsize is 0 or greater than U16_MAX or @nla length greater
+ *            than @dstsize.
  */
-size_t nla_strlcpy(char *dst, const struct nlattr *nla, size_t dstsize)
+ssize_t nla_strscpy(char *dst, const struct nlattr *nla, size_t dstsize)
 {
 	size_t srclen = nla_len(nla);
 	char *src = nla_data(nla);
+	ssize_t ret;
+	size_t len;
+
+	if (dstsize == 0 || WARN_ON_ONCE(dstsize > U16_MAX))
+		return -E2BIG;
 
 	if (srclen > 0 && src[srclen - 1] == '\0')
 		srclen--;
 
-	if (dstsize > 0) {
-		size_t len = (srclen >= dstsize) ? dstsize - 1 : srclen;
-
-		memset(dst, 0, dstsize);
-		memcpy(dst, src, len);
+	if (srclen >= dstsize) {
+		len = dstsize - 1;
+		ret = -E2BIG;
+	} else {
+		len = srclen;
+		ret = len;
 	}
 
-	return srclen;
+	memcpy(dst, src, len);
+	/* Zero pad end of dst. */
+	memset(dst + len, 0, dstsize - len);
+
+	return ret;
 }
-EXPORT_SYMBOL(nla_strlcpy);
+EXPORT_SYMBOL(nla_strscpy);
 
 /**
  * nla_strdup - Copy string attribute payload into a newly allocated buffer

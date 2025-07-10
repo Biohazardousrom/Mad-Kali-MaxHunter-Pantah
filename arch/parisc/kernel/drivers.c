@@ -133,14 +133,13 @@ static int parisc_driver_probe(struct device *dev)
 	return rc;
 }
 
-static int __exit parisc_driver_remove(struct device *dev)
+static void __exit parisc_driver_remove(struct device *dev)
 {
 	struct parisc_device *pa_dev = to_parisc_device(dev);
 	struct parisc_driver *pa_drv = to_parisc_driver(dev->driver);
+
 	if (pa_drv->remove)
 		pa_drv->remove(pa_dev);
-
-	return 0;
 }
 	
 
@@ -1003,6 +1002,9 @@ static __init int qemu_print_iodc_data(struct device *lin_dev, void *data)
 	}
 
 	pr_info("\n");
+
+	/* Prevent hung task messages when printing on serial console */
+	cond_resched();
 
 	pr_info("#define HPA_%08lx_DESCRIPTION \"%s\"\n",
 		hpa, parisc_hardware_description(&dev->id));

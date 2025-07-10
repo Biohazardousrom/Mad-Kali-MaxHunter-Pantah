@@ -14,6 +14,10 @@
 #include <hyp/adjust_pc.h>
 #include <nvhe/iommu.h>
 #include <nvhe/mm.h>
+#include <nvhe/modules.h>
+#include <nvhe/pkvm.h>
+
+#define DRV_ID(drv_addr)			((unsigned long)drv_addr)
 
 enum {
 	IOMMU_DRIVER_NOT_READY = 0,
@@ -21,61 +25,50 @@ enum {
 	IOMMU_DRIVER_READY,
 };
 
-struct pkvm_iommu_driver {
-	const struct pkvm_iommu_ops *ops;
-	atomic_t state;
-};
-
-static struct pkvm_iommu_driver iommu_drivers[PKVM_IOMMU_NR_DRIVERS];
-
-/* IOMMU device list. Must only be accessed with host_kvm.lock held. */
+/* List of registered IOMMU drivers, protected with iommu_drv_lock. */
+static LIST_HEAD(iommu_drivers);
+/* IOMMU device list. Must only be accessed with host_mmu.lock held. */
 static LIST_HEAD(iommu_list);
 
 static bool iommu_finalized;
 static DEFINE_HYP_SPINLOCK(iommu_registration_lock);
+static DEFINE_HYP_SPINLOCK(iommu_drv_lock);
 
 static void *iommu_mem_pool;
 static size_t iommu_mem_remaining;
 
 static void assert_host_component_locked(void)
 {
-	hyp_assert_lock_held(&host_kvm.lock);
+	hyp_assert_lock_held(&host_mmu.lock);
 }
 
 static void host_lock_component(void)
 {
-	hyp_spin_lock(&host_kvm.lock);
+	hyp_spin_lock(&host_mmu.lock);
 }
 
 static void host_unlock_component(void)
 {
-	hyp_spin_unlock(&host_kvm.lock);
+	hyp_spin_unlock(&host_mmu.lock);
 }
 
 /*
  * Find IOMMU driver by its ID. The input ID is treated as unstrusted
  * and is properly validated.
  */
-static inline struct pkvm_iommu_driver *get_driver(enum pkvm_iommu_driver_id id)
+static inline struct pkvm_iommu_driver *get_driver(unsigned long id)
 {
-	size_t index = (size_t)id;
+	struct pkvm_iommu_driver *drv, *ret = NULL;
 
-	if (index >= ARRAY_SIZE(iommu_drivers))
-		return NULL;
-
-	return &iommu_drivers[index];
-}
-
-static const struct pkvm_iommu_ops *get_driver_ops(enum pkvm_iommu_driver_id id)
-{
-	switch (id) {
-	case PKVM_IOMMU_DRIVER_S2MPU:
-		return IS_ENABLED(CONFIG_KVM_S2MPU) ? &pkvm_s2mpu_ops : NULL;
-	case PKVM_IOMMU_DRIVER_SYSMMU_SYNC:
-		return IS_ENABLED(CONFIG_KVM_S2MPU) ? &pkvm_sysmmu_sync_ops : NULL;
-	default:
-		return NULL;
+	hyp_spin_lock(&iommu_drv_lock);
+	list_for_each_entry(drv, &iommu_drivers, list) {
+		if (DRV_ID(drv) == id) {
+			ret =  drv;
+			break;
+		}
 	}
+	hyp_spin_unlock(&iommu_drv_lock);
+	return ret;
 }
 
 static inline bool driver_acquire_init(struct pkvm_iommu_driver *drv)
@@ -101,6 +94,35 @@ static size_t __iommu_alloc_size(struct pkvm_iommu_driver *drv)
 {
 	return ALIGN(sizeof(struct pkvm_iommu) + drv->ops->data_size,
 		     sizeof(unsigned long));
+}
+
+static bool validate_driver_id_unique(struct pkvm_iommu_driver *drv)
+{
+	struct pkvm_iommu_driver *cur;
+
+	hyp_assert_lock_held(&iommu_drv_lock);
+	list_for_each_entry(cur, &iommu_drivers, list) {
+		if (DRV_ID(drv) == DRV_ID(cur))
+			return false;
+	}
+	return true;
+}
+
+static int __pkvm_register_iommu_driver(struct pkvm_iommu_driver *drv)
+{
+	int ret = 0;
+
+	if (!drv)
+		return -EINVAL;
+
+	hyp_assert_lock_held(&iommu_registration_lock);
+	hyp_spin_lock(&iommu_drv_lock);
+	if (validate_driver_id_unique(drv))
+		list_add_tail(&drv->list, &iommu_drivers);
+	else
+		ret = -EEXIST;
+	hyp_spin_unlock(&iommu_drv_lock);
+	return ret;
 }
 
 /* Global memory pool for allocating IOMMU list entry structs. */
@@ -140,7 +162,7 @@ static inline void free_iommu(struct pkvm_iommu_driver *drv, struct pkvm_iommu *
 		return;
 
 	/* Only allow freeing the last allocated buffer. */
-	if ((void*)ptr + size != iommu_mem_pool)
+	if ((void *)ptr + size != iommu_mem_pool)
 		return;
 
 	iommu_mem_pool -= size;
@@ -159,7 +181,7 @@ static bool is_overlap(phys_addr_t r1_start, size_t r1_size,
 static bool is_mmio_range(phys_addr_t base, size_t size)
 {
 	struct memblock_region *reg;
-	phys_addr_t limit = BIT(host_kvm.pgt.ia_bits);
+	phys_addr_t limit = BIT(host_mmu.pgt.ia_bits);
 	size_t i;
 
 	/* Check against limits of host IPA space. */
@@ -201,7 +223,7 @@ static int snapshot_host_stage2(struct pkvm_iommu_driver * const drv)
 		.arg	= drv,
 		.flags	= KVM_PGTABLE_WALK_LEAF,
 	};
-	struct kvm_pgtable *pgt = &host_kvm.pgt;
+	struct kvm_pgtable *pgt = &host_mmu.pgt;
 
 	if (!drv->ops->host_stage2_idmap_prepare)
 		return 0;
@@ -247,13 +269,10 @@ static struct pkvm_iommu *find_iommu_by_id(unsigned long id)
  * arguments are passed in a shared memory buffer. The driver is expected to
  * initialize it's page-table bookkeeping.
  */
-int __pkvm_iommu_driver_init(enum pkvm_iommu_driver_id id, void *data, size_t size)
+int __pkvm_iommu_driver_init(struct pkvm_iommu_driver *drv, void *data, size_t size)
 {
-	struct pkvm_iommu_driver *drv;
 	const struct pkvm_iommu_ops *ops;
 	int ret = 0;
-
-	data = kern_hyp_va(data);
 
 	/* New driver initialization not allowed after __pkvm_iommu_finalize(). */
 	hyp_spin_lock(&iommu_registration_lock);
@@ -262,9 +281,11 @@ int __pkvm_iommu_driver_init(enum pkvm_iommu_driver_id id, void *data, size_t si
 		goto out_unlock;
 	}
 
-	drv = get_driver(id);
-	ops = get_driver_ops(id);
-	if (!drv || !ops) {
+	ret =  __pkvm_register_iommu_driver(drv);
+	if (ret)
+		return ret;
+
+	if (!drv->ops) {
 		ret = -EINVAL;
 		goto out_unlock;
 	}
@@ -274,7 +295,7 @@ int __pkvm_iommu_driver_init(enum pkvm_iommu_driver_id id, void *data, size_t si
 		goto out_unlock;
 	}
 
-	drv->ops = ops;
+	ops = drv->ops;
 
 	/* This can change stage-2 mappings. */
 	if (ops->init) {
@@ -306,11 +327,10 @@ out_unlock:
 	return ret;
 }
 
-int __pkvm_iommu_register(unsigned long dev_id,
-			  enum pkvm_iommu_driver_id drv_id,
+int __pkvm_iommu_register(unsigned long dev_id, unsigned long drv_id,
 			  phys_addr_t dev_pa, size_t dev_size,
-			  unsigned long parent_id,
-			  void *kern_mem_va, size_t mem_size)
+			  unsigned long parent_id, u8 flags,
+			  void *kern_mem_va)
 {
 	struct pkvm_iommu *dev = NULL;
 	struct pkvm_iommu_driver *drv;
@@ -344,16 +364,15 @@ int __pkvm_iommu_register(unsigned long dev_id,
 	 * Accept memory donation if the host is providing new memory.
 	 * Note: We do not return the memory even if there is an error later.
 	 */
-	if (kern_mem_va && mem_size) {
+	if (kern_mem_va) {
 		mem_va = kern_hyp_va(kern_mem_va);
 
-		if (!PAGE_ALIGNED(mem_va) || !PAGE_ALIGNED(mem_size)) {
+		if (!PAGE_ALIGNED(mem_va)) {
 			ret = -EINVAL;
 			goto out_unlock;
 		}
 
-		ret = __pkvm_host_donate_hyp(hyp_virt_to_pfn(mem_va),
-					     mem_size >> PAGE_SHIFT);
+		ret = __pkvm_host_donate_hyp(hyp_virt_to_pfn(mem_va), 1);
 		if (ret)
 			goto out_unlock;
 	}
@@ -361,7 +380,7 @@ int __pkvm_iommu_register(unsigned long dev_id,
 	host_lock_component();
 
 	/* Allocate memory for the new device entry. */
-	dev = alloc_iommu(drv, mem_va, mem_size);
+	dev = alloc_iommu(drv, mem_va, PAGE_SIZE);
 	if (!dev) {
 		ret = -ENOMEM;
 		goto out_free;
@@ -373,7 +392,9 @@ int __pkvm_iommu_register(unsigned long dev_id,
 		.id = dev_id,
 		.ops = drv->ops,
 		.pa = dev_pa,
+		.va = hyp_phys_to_virt(dev_pa),
 		.size = dev_size,
+		.flags = flags,
 	};
 
 	if (!validate_against_existing_iommus(dev)) {
@@ -401,22 +422,10 @@ int __pkvm_iommu_register(unsigned long dev_id,
 			goto out_free;
 	}
 
-	/*
-	 * Unmap the device's MMIO range from host stage-2. If registration
-	 * is successful, future attempts to re-map will be blocked by
-	 * pkvm_iommu_host_stage2_adjust_range.
-	 */
-	ret = host_stage2_unmap_dev_locked(dev_pa, dev_size);
+	ret = __pkvm_host_donate_hyp_locked(hyp_phys_to_pfn(dev_pa),
+					    PAGE_ALIGN(dev_size) >> PAGE_SHIFT);
 	if (ret)
 		goto out_free;
-
-	/* Create EL2 mapping for the device. Do it last as it is irreversible. */
-	dev->va = (void *)__pkvm_create_private_mapping(dev_pa, dev_size,
-							PAGE_HYP_DEVICE);
-	if (IS_ERR(dev->va)) {
-		ret = PTR_ERR(dev->va);
-		goto out_free;
-	}
 
 	/* Register device and prevent host from mapping the MMIO range. */
 	list_add_tail(&dev->list, &iommu_list);
@@ -433,9 +442,12 @@ out_unlock:
 	return ret;
 }
 
-int __pkvm_iommu_finalize(void)
+int __pkvm_iommu_finalize(int err)
 {
 	int ret = 0;
+
+	/* Err is not currently used in EL2.*/
+	WARN_ON(err);
 
 	hyp_spin_lock(&iommu_registration_lock);
 	if (!iommu_finalized)
@@ -443,6 +455,7 @@ int __pkvm_iommu_finalize(void)
 	else
 		ret = -EPERM;
 	hyp_spin_unlock(&iommu_registration_lock);
+
 	return ret;
 }
 
@@ -472,39 +485,6 @@ int __pkvm_iommu_pm_notify(unsigned long dev_id, enum pkvm_iommu_pm_event event)
 	return ret;
 }
 
-/*
- * Check host memory access against IOMMUs' MMIO regions.
- * Returns -EPERM if the address is within the bounds of a registered device.
- * Otherwise returns zero and adjusts boundaries of the new mapping to avoid
- * MMIO regions of registered IOMMUs.
- */
-int pkvm_iommu_host_stage2_adjust_range(phys_addr_t addr, phys_addr_t *start,
-					phys_addr_t *end)
-{
-	struct pkvm_iommu *dev;
-	phys_addr_t new_start = *start;
-	phys_addr_t new_end = *end;
-	phys_addr_t dev_start, dev_end;
-
-	assert_host_component_locked();
-
-	list_for_each_entry(dev, &iommu_list, list) {
-		dev_start = dev->pa;
-		dev_end = dev_start + dev->size;
-
-		if (addr < dev_start)
-			new_end = min(new_end, dev_start);
-		else if (addr >= dev_end)
-			new_start = max(new_start, dev_end);
-		else
-			return -EPERM;
-	}
-
-	*start = new_start;
-	*end = new_end;
-	return 0;
-}
-
 bool pkvm_iommu_host_dabt_handler(struct kvm_cpu_context *host_ctxt, u32 esr,
 				  phys_addr_t pa)
 {
@@ -532,15 +512,14 @@ void pkvm_iommu_host_stage2_idmap(phys_addr_t start, phys_addr_t end,
 {
 	struct pkvm_iommu_driver *drv;
 	struct pkvm_iommu *dev;
-	size_t i;
 
 	assert_host_component_locked();
-
-	for (i = 0; i < ARRAY_SIZE(iommu_drivers); i++) {
-		drv = get_driver(i);
+	hyp_spin_lock(&iommu_drv_lock);
+	list_for_each_entry(drv, &iommu_drivers, list) {
 		if (drv && is_driver_ready(drv) && drv->ops->host_stage2_idmap_prepare)
 			drv->ops->host_stage2_idmap_prepare(start, end, prot);
 	}
+	hyp_spin_unlock(&iommu_drv_lock);
 
 	list_for_each_entry(dev, &iommu_list, list) {
 		if (dev->powered && dev->ops->host_stage2_idmap_apply)

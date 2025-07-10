@@ -18,6 +18,8 @@ import sys
 #
 
 
+# Kselftest framework requirement - SKIP code is 4
+KSFT_SKIP=4
 Port = collections.namedtuple('Port', 'bus_info name')
 
 

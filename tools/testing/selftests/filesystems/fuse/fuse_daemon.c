@@ -245,7 +245,7 @@ int main(int argc, char *argv[])
 
 	for (;;) {
 		uint8_t bytes_in[FUSE_MIN_READ_BUFFER];
-		uint8_t bytes_out[FUSE_MIN_READ_BUFFER] __attribute__((unused));
+		uint8_t bytes_out[FUSE_MIN_READ_BUFFER] __maybe_unused;
 		struct fuse_in_header *in_header =
 			(struct fuse_in_header *)bytes_in;
 		ssize_t res = read(fuse_dev, bytes_in, sizeof(bytes_in));

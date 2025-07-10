@@ -59,6 +59,7 @@
 #include <asm/unwind.h>
 #include <asm/memblock.h>
 #include <asm/virt.h>
+#include <asm/kasan.h>
 
 #include "atags.h"
 
@@ -140,10 +141,10 @@ EXPORT_SYMBOL(outer_cache);
 int __cpu_architecture __read_mostly = CPU_ARCH_UNKNOWN;
 
 struct stack {
-	u32 irq[3];
-	u32 abt[3];
-	u32 und[3];
-	u32 fiq[3];
+	u32 irq[4];
+	u32 abt[4];
+	u32 und[4];
+	u32 fiq[4];
 } ____cacheline_aligned;
 
 #ifndef CONFIG_CPU_V7M
@@ -766,7 +767,7 @@ int __init arm_add_memory(u64 start, u64 size)
 #ifndef CONFIG_PHYS_ADDR_T_64BIT
 	if (aligned_start > ULONG_MAX) {
 		pr_crit("Ignoring memory at 0x%08llx outside 32-bit physical address space\n",
-			(long long)start);
+			start);
 		return -EINVAL;
 	}
 
@@ -1003,7 +1004,8 @@ static void __init reserve_crashkernel(void)
 	total_mem = get_total_mem();
 	ret = parse_crashkernel(boot_command_line, total_mem,
 				&crash_size, &crash_base);
-	if (ret)
+	/* invalid value specified or crashkernel=0 */
+	if (ret || !crash_size)
 		return;
 
 	if (crash_base <= 0) {
@@ -1011,29 +1013,23 @@ static void __init reserve_crashkernel(void)
 		unsigned long long lowmem_max = __pa(high_memory - 1) + 1;
 		if (crash_max > lowmem_max)
 			crash_max = lowmem_max;
-		crash_base = memblock_find_in_range(CRASH_ALIGN, crash_max,
-						    crash_size, CRASH_ALIGN);
+
+		crash_base = memblock_phys_alloc_range(crash_size, CRASH_ALIGN,
+						       CRASH_ALIGN, crash_max);
 		if (!crash_base) {
 			pr_err("crashkernel reservation failed - No suitable area found.\n");
 			return;
 		}
 	} else {
+		unsigned long long crash_max = crash_base + crash_size;
 		unsigned long long start;
 
-		start = memblock_find_in_range(crash_base,
-					       crash_base + crash_size,
-					       crash_size, SECTION_SIZE);
-		if (start != crash_base) {
+		start = memblock_phys_alloc_range(crash_size, SECTION_SIZE,
+						  crash_base, crash_max);
+		if (!start) {
 			pr_err("crashkernel reservation failed - memory is in use.\n");
 			return;
 		}
-	}
-
-	ret = memblock_reserve(crash_base, crash_size);
-	if (ret < 0) {
-		pr_warn("crashkernel reservation failed - memory is in use (0x%lx)\n",
-			(unsigned long)crash_base);
-		return;
 	}
 
 	pr_info("Reserving %ldMB of memory at %ldMB for crashkernel (System RAM: %ldMB)\n",
@@ -1129,10 +1125,7 @@ void __init setup_arch(char **cmdline_p)
 	if (mdesc->reboot_mode != REBOOT_HARD)
 		reboot_mode = mdesc->reboot_mode;
 
-	init_mm.start_code = (unsigned long) _text;
-	init_mm.end_code   = (unsigned long) _etext;
-	init_mm.end_data   = (unsigned long) _edata;
-	init_mm.brk	   = (unsigned long) _end;
+	setup_initial_init_mm(_text, _etext, _edata, _end);
 
 	/* populate cmd_line too for later use, preserving boot_command_line */
 	strlcpy(cmd_line, boot_command_line, COMMAND_LINE_SIZE);
@@ -1148,10 +1141,10 @@ void __init setup_arch(char **cmdline_p)
 #endif
 	setup_dma_zone(mdesc);
 	xen_early_init();
-	efi_init();
+	arm_efi_init();
 	/*
 	 * Make sure the calculation for lowmem/highmem is set appropriately
-	 * before reserving/allocating any mmeory
+	 * before reserving/allocating any memory
 	 */
 	adjust_lowmem_bounds();
 	arm_memblock_init(mdesc);
@@ -1161,6 +1154,7 @@ void __init setup_arch(char **cmdline_p)
 	early_ioremap_reset();
 
 	paging_init(mdesc);
+	kasan_init();
 	request_standard_resources(mdesc);
 
 	if (mdesc->restart) {

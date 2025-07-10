@@ -10,7 +10,7 @@
 #include <linux/can.h>
 #include <linux/can/dev.h>
 #include <linux/can/error.h>
-#include <linux/can/led.h>
+#include <linux/ethtool.h>
 #include <linux/module.h>
 #include <linux/netdevice.h>
 #include <linux/signal.h>
@@ -64,7 +64,6 @@
 struct mcba_usb_ctx {
 	struct mcba_priv *priv;
 	u32 ndx;
-	u8 dlc;
 	bool can;
 };
 
@@ -186,13 +185,10 @@ static inline struct mcba_usb_ctx *mcba_usb_get_free_ctx(struct mcba_priv *priv,
 			ctx = &priv->tx_context[i];
 			ctx->ndx = i;
 
-			if (cf) {
+			if (cf)
 				ctx->can = true;
-				ctx->dlc = cf->can_dlc;
-			} else {
+			else
 				ctx->can = false;
-				ctx->dlc = 0;
-			}
 
 			atomic_dec(&priv->free_ctx_cnt);
 			break;
@@ -238,10 +234,8 @@ static void mcba_usb_write_bulk_callback(struct urb *urb)
 			return;
 
 		netdev->stats.tx_packets++;
-		netdev->stats.tx_bytes += ctx->dlc;
-
-		can_led_event(netdev, CAN_LED_EVENT_TX);
-		can_get_echo_skb(netdev, ctx->ndx);
+		netdev->stats.tx_bytes += can_get_echo_skb(netdev, ctx->ndx,
+							   NULL);
 	}
 
 	if (urb->status)
@@ -321,7 +315,7 @@ static netdev_tx_t mcba_usb_start_xmit(struct sk_buff *skb,
 		.cmd_id = MBCA_CMD_TRANSMIT_MESSAGE_EV
 	};
 
-	if (can_dropped_invalid_skb(netdev, skb))
+	if (can_dev_dropped_skb(netdev, skb))
 		return NETDEV_TX_OK;
 
 	ctx = mcba_usb_get_free_ctx(priv, cf);
@@ -350,14 +344,14 @@ static netdev_tx_t mcba_usb_start_xmit(struct sk_buff *skb,
 		usb_msg.eid = 0;
 	}
 
-	usb_msg.dlc = cf->can_dlc;
+	usb_msg.dlc = cf->len;
 
 	memcpy(usb_msg.data, cf->data, usb_msg.dlc);
 
 	if (cf->can_id & CAN_RTR_FLAG)
 		usb_msg.dlc |= MCBA_DLC_RTR_MASK;
 
-	can_put_echo_skb(skb, priv->netdev, ctx->ndx);
+	can_put_echo_skb(skb, priv->netdev, ctx->ndx, 0);
 
 	err = mcba_usb_xmit(priv, (struct mcba_usb_msg *)&usb_msg, ctx);
 	if (err)
@@ -366,7 +360,7 @@ static netdev_tx_t mcba_usb_start_xmit(struct sk_buff *skb,
 	return NETDEV_TX_OK;
 
 xmit_failed:
-	can_free_echo_skb(priv->netdev, ctx->ndx);
+	can_free_echo_skb(priv->netdev, ctx->ndx, NULL);
 	mcba_usb_free_ctx(ctx);
 	stats->tx_dropped++;
 
@@ -449,17 +443,17 @@ static void mcba_usb_process_can(struct mcba_priv *priv,
 		cf->can_id = (sid & 0xffe0) >> 5;
 	}
 
-	if (msg->dlc & MCBA_DLC_RTR_MASK)
+	cf->len = can_cc_dlc2len(msg->dlc & MCBA_DLC_MASK);
+
+	if (msg->dlc & MCBA_DLC_RTR_MASK) {
 		cf->can_id |= CAN_RTR_FLAG;
+	} else {
+		memcpy(cf->data, msg->data, cf->len);
 
-	cf->can_dlc = get_can_dlc(msg->dlc & MCBA_DLC_MASK);
-
-	memcpy(cf->data, msg->data, cf->can_dlc);
-
+		stats->rx_bytes += cf->len;
+	}
 	stats->rx_packets++;
-	stats->rx_bytes += cf->can_dlc;
 
-	can_led_event(priv->netdev, CAN_LED_EVENT_RX);
 	netif_rx(skb);
 }
 
@@ -467,7 +461,7 @@ static void mcba_usb_process_ka_usb(struct mcba_priv *priv,
 				    struct mcba_usb_msg_ka_usb *msg)
 {
 	if (unlikely(priv->usb_ka_first_pass)) {
-		netdev_info(priv->netdev, "PIC USB version %hhu.%hhu\n",
+		netdev_info(priv->netdev, "PIC USB version %u.%u\n",
 			    msg->soft_ver_major, msg->soft_ver_minor);
 
 		priv->usb_ka_first_pass = false;
@@ -493,7 +487,7 @@ static void mcba_usb_process_ka_can(struct mcba_priv *priv,
 				    struct mcba_usb_msg_ka_can *msg)
 {
 	if (unlikely(priv->can_ka_first_pass)) {
-		netdev_info(priv->netdev, "PIC CAN version %hhu.%hhu\n",
+		netdev_info(priv->netdev, "PIC CAN version %u.%u\n",
 			    msg->soft_ver_major, msg->soft_ver_minor);
 
 		priv->can_ka_first_pass = false;
@@ -555,7 +549,7 @@ static void mcba_usb_process_rx(struct mcba_priv *priv,
 		break;
 
 	default:
-		netdev_warn(priv->netdev, "Unsupported msg (0x%hhX)",
+		netdev_warn(priv->netdev, "Unsupported msg (0x%X)",
 			    msg->cmd_id);
 		break;
 	}
@@ -707,7 +701,6 @@ static int mcba_usb_open(struct net_device *netdev)
 	priv->can_speed_check = true;
 	priv->can.state = CAN_STATE_ERROR_ACTIVE;
 
-	can_led_event(netdev, CAN_LED_EVENT_OPEN);
 	netif_start_queue(netdev);
 
 	return 0;
@@ -739,7 +732,6 @@ static int mcba_usb_close(struct net_device *netdev)
 	mcba_urb_unlink(priv);
 
 	close_candev(netdev);
-	can_led_event(netdev, CAN_LED_EVENT_STOP);
 
 	return 0;
 }
@@ -769,6 +761,10 @@ static const struct net_device_ops mcba_netdev_ops = {
 	.ndo_open = mcba_usb_open,
 	.ndo_stop = mcba_usb_close,
 	.ndo_start_xmit = mcba_usb_start_xmit,
+};
+
+static const struct ethtool_ops mcba_ethtool_ops = {
+	.get_ts_info = ethtool_op_get_ts_info,
 };
 
 /* Microchip CANBUS has hardcoded bittiming values by default.
@@ -849,6 +845,7 @@ static int mcba_usb_probe(struct usb_interface *intf,
 	priv->can.do_set_bittiming = mcba_net_set_bittiming;
 
 	netdev->netdev_ops = &mcba_netdev_ops;
+	netdev->ethtool_ops = &mcba_ethtool_ops;
 
 	netdev->flags |= IFF_ECHO; /* we support local echo */
 
@@ -863,8 +860,6 @@ static int mcba_usb_probe(struct usb_interface *intf,
 
 	priv->rx_pipe = usb_rcvbulkpipe(priv->udev, in->bEndpointAddress);
 	priv->tx_pipe = usb_sndbulkpipe(priv->udev, out->bEndpointAddress);
-
-	devm_can_led_init(netdev);
 
 	/* Start USB dev only if we have successfully registered CAN device */
 	err = mcba_usb_start(priv);

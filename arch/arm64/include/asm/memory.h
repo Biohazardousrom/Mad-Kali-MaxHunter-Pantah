@@ -30,8 +30,8 @@
  * keep a constant PAGE_OFFSET and "fallback" to using the higher end
  * of the VMEMMAP where 52-bit support is not available in hardware.
  */
-#define VMEMMAP_SIZE ((_PAGE_END(VA_BITS_MIN) - PAGE_OFFSET) \
-			>> (PAGE_SHIFT - STRUCT_PAGE_MAX_SHIFT))
+#define VMEMMAP_SHIFT	(PAGE_SHIFT - STRUCT_PAGE_MAX_SHIFT)
+#define VMEMMAP_SIZE	((_PAGE_END(VA_BITS_MIN) - PAGE_OFFSET) >> VMEMMAP_SHIFT)
 
 /*
  * PAGE_OFFSET - the virtual address of the start of the linear map, at the
@@ -45,13 +45,13 @@
 #define PAGE_OFFSET		(_PAGE_OFFSET(VA_BITS))
 #define KIMAGE_VADDR		(MODULES_END)
 #define MODULES_END		(MODULES_VADDR + MODULES_VSIZE)
-#define MODULES_VADDR		(KASAN_SHADOW_END)
+#define MODULES_VADDR		(_PAGE_END(VA_BITS_MIN))
 #define MODULES_VSIZE		(SZ_128M)
-#define VMEMMAP_START		(-VMEMMAP_SIZE - SZ_2M)
+#define VMEMMAP_START		(-(UL(1) << (VA_BITS - VMEMMAP_SHIFT)))
 #define VMEMMAP_END		(VMEMMAP_START + VMEMMAP_SIZE)
-#define PCI_IO_END		(VMEMMAP_START - SZ_2M)
+#define PCI_IO_END		(VMEMMAP_START - SZ_8M)
 #define PCI_IO_START		(PCI_IO_END - PCI_IO_SIZE)
-#define FIXADDR_TOP		(PCI_IO_START - SZ_2M)
+#define FIXADDR_TOP		(VMEMMAP_START - SZ_32M)
 
 #if VA_BITS > 48
 #define VA_BITS_MIN		(48)
@@ -73,10 +73,11 @@
 #define KASAN_SHADOW_OFFSET	_AC(CONFIG_KASAN_SHADOW_OFFSET, UL)
 #define KASAN_SHADOW_END	((UL(1) << (64 - KASAN_SHADOW_SCALE_SHIFT)) \
 					+ KASAN_SHADOW_OFFSET)
+#define PAGE_END		(KASAN_SHADOW_END - (1UL << (vabits_actual - KASAN_SHADOW_SCALE_SHIFT)))
 #define KASAN_THREAD_SHIFT	1
 #else
 #define KASAN_THREAD_SHIFT	0
-#define KASAN_SHADOW_END	(_PAGE_END(VA_BITS_MIN))
+#define PAGE_END		(_PAGE_END(VA_BITS_MIN))
 #endif /* CONFIG_KASAN */
 
 #define MIN_THREAD_SHIFT	(14 + KASAN_THREAD_SHIFT)
@@ -112,6 +113,22 @@
 
 #define OVERFLOW_STACK_SIZE	SZ_4K
 
+#if PAGE_SIZE == SZ_4K
+#define NVHE_STACK_SHIFT       (PAGE_SHIFT + 1)
+#else
+#define NVHE_STACK_SHIFT       PAGE_SHIFT
+#endif
+
+#define NVHE_STACK_SIZE        (UL(1) << NVHE_STACK_SHIFT)
+
+/*
+ * With the minimum frame size of [x29, x30], exactly half the combined
+ * sizes of the hyp and overflow stacks is the maximum size needed to
+ * save the unwinded stacktrace; plus an additional entry to delimit the
+ * end.
+ */
+#define NVHE_STACKTRACE_SIZE	((OVERFLOW_STACK_SIZE + NVHE_STACK_SIZE) / 2 + sizeof(long))
+
 /*
  * Alignment of kernel segments (e.g. .text, .data).
  *
@@ -131,16 +148,15 @@
 #define MT_NORMAL		0
 #define MT_NORMAL_TAGGED	1
 #define MT_NORMAL_NC		2
-#define MT_NORMAL_WT		3
-#define MT_DEVICE_nGnRnE	4
-#define MT_DEVICE_nGnRE		5
-#define MT_DEVICE_GRE		6
-#define MT_NORMAL_iNC_oWB	7
+#define MT_DEVICE_nGnRnE	3
+#define MT_DEVICE_nGnRE		4
+#define MT_NORMAL_iNC_oWB	5
 
 /*
  * Memory types for Stage-2 translation
  */
 #define MT_S2_NORMAL		0xf
+#define MT_S2_NORMAL_NC		0x5
 #define MT_S2_DEVICE_nGnRE	0x1
 
 /*
@@ -148,6 +164,7 @@
  * Stage-2 enforces Normal-WB and Device-nGnRE
  */
 #define MT_S2_FWB_NORMAL	6
+#define MT_S2_FWB_NORMAL_NC	5
 #define MT_S2_FWB_DEVICE_nGnRE	1
 
 #ifdef CONFIG_ARM64_4K_PAGES
@@ -155,6 +172,18 @@
 #else
 #define IOREMAP_MAX_ORDER	(PMD_SHIFT)
 #endif
+
+/*
+ *  Open-coded (swapper_pg_dir - reserved_pg_dir) as this cannot be calculated
+ *  until link time.
+ */
+#define RESERVED_SWAPPER_OFFSET	(PAGE_SIZE)
+
+/*
+ *  Open-coded (swapper_pg_dir - tramp_pg_dir) as this cannot be calculated
+ *  until link time.
+ */
+#define TRAMP_SWAPPER_OFFSET	(2 * PAGE_SIZE)
 
 #ifndef __ASSEMBLY__
 
@@ -164,8 +193,11 @@
 #include <linux/types.h>
 #include <asm/bug.h>
 
+#if VA_BITS > 48
 extern u64			vabits_actual;
-#define PAGE_END		(_PAGE_END(vabits_actual))
+#else
+#define vabits_actual		((u64)VA_BITS)
+#endif
 
 extern s64			memstart_addr;
 /* PHYS_OFFSET - the physical address of the start of memory. */
@@ -229,9 +261,11 @@ static inline const void *__tag_set(const void *addr, u8 tag)
 }
 
 #ifdef CONFIG_KASAN_HW_TAGS
-#define arch_enable_tagging_sync()		mte_enable_kernel_sync()
-#define arch_enable_tagging_async()		mte_enable_kernel_async()
-#define arch_enable_tagging_asymm()		mte_enable_kernel_asymm()
+#define arch_enable_tag_checks_sync()		mte_enable_kernel_sync()
+#define arch_enable_tag_checks_async()		mte_enable_kernel_async()
+#define arch_enable_tag_checks_asymm()		mte_enable_kernel_asymm()
+#define arch_suppress_tag_checks_start()	mte_enable_tco()
+#define arch_suppress_tag_checks_stop()		mte_disable_tco()
 #define arch_force_async_tag_fault()		mte_check_tfsr_exit()
 #define arch_get_random_tag()			mte_get_random_tag()
 #define arch_get_mem_tag(addr)			mte_get_mem_tag(addr)
@@ -251,9 +285,9 @@ static inline const void *__tag_set(const void *addr, u8 tag)
  * lives in the [PAGE_OFFSET, PAGE_END) interval at the bottom of the
  * kernel's TTBR1 address range.
  */
-#define __is_lm_address(addr)	(((u64)(addr) ^ PAGE_OFFSET) < (PAGE_END - PAGE_OFFSET))
+#define __is_lm_address(addr)	(((u64)(addr) - PAGE_OFFSET) < (PAGE_END - PAGE_OFFSET))
 
-#define __lm_to_phys(addr)	(((addr) & ~PAGE_OFFSET) + PHYS_OFFSET)
+#define __lm_to_phys(addr)	(((addr) - PAGE_OFFSET) + PHYS_OFFSET)
 #define __kimg_to_phys(addr)	((addr) - kimage_voffset)
 
 #define __virt_to_phys_nodebug(x) ({					\
@@ -309,30 +343,12 @@ static inline void *phys_to_virt(phys_addr_t x)
 #define sym_to_pfn(x)		__phys_to_pfn(__pa_symbol(x))
 
 /*
- * With non-canonical CFI jump tables, the compiler replaces function
- * address references with the address of the function's CFI jump
- * table entry. This results in __pa_symbol(function) returning the
- * physical address of the jump table entry, which can lead to address
- * space confusion since the jump table points to the function's
- * virtual address. Therefore, use inline assembly to ensure we are
- * always taking the address of the actual function.
- */
-#define __va_function(x) ({						\
-	void *addr;							\
-	asm("adrp %0, " __stringify(x) "\n\t"				\
-	    "add  %0, %0, :lo12:" __stringify(x) : "=r" (addr));	\
-	addr;								\
-})
-
-#define __pa_function(x) 	__pa_symbol(__va_function(x))
-
-/*
  *  virt_to_page(x)	convert a _valid_ virtual address to struct page *
  *  virt_addr_valid(x)	indicates whether a virtual address is valid
  */
 #define ARCH_PFN_OFFSET		((unsigned long)PHYS_PFN_OFFSET)
 
-#if !defined(CONFIG_SPARSEMEM_VMEMMAP) || defined(CONFIG_DEBUG_VIRTUAL)
+#if defined(CONFIG_DEBUG_VIRTUAL)
 #define page_to_virt(x)	({						\
 	__typeof__(x) __page = x;					\
 	void *__addr = __va(page_to_phys(__page));			\
@@ -352,14 +368,19 @@ static inline void *phys_to_virt(phys_addr_t x)
 	u64 __addr = VMEMMAP_START + (__idx * sizeof(struct page));	\
 	(struct page *)__addr;						\
 })
-#endif /* !CONFIG_SPARSEMEM_VMEMMAP || CONFIG_DEBUG_VIRTUAL */
+#endif /* CONFIG_DEBUG_VIRTUAL */
 
 #define virt_addr_valid(addr)	({					\
 	__typeof__(addr) __addr = __tag_reset(addr);			\
-	__is_lm_address(__addr) && pfn_valid(virt_to_pfn(__addr));	\
+	__is_lm_address(__addr) && pfn_is_map_memory(virt_to_pfn(__addr));	\
 })
 
 void dump_mem_limit(void);
+
+static inline bool defer_reserve_crashkernel(void)
+{
+	return IS_ENABLED(CONFIG_ZONE_DMA) || IS_ENABLED(CONFIG_ZONE_DMA32);
+}
 #endif /* !ASSEMBLY */
 
 /*
@@ -371,6 +392,15 @@ void dump_mem_limit(void);
  */
 #if defined(CONFIG_EFI) && defined(CONFIG_ARM_GIC_V3_ITS)
 # define INIT_MEMBLOCK_RESERVED_REGIONS	(INIT_MEMBLOCK_REGIONS + NR_CPUS + 1)
+#endif
+
+/*
+ * memory regions which marked with flag MEMBLOCK_NOMAP(for example, the memory
+ * of the EFI_UNUSABLE_MEMORY type) may divide a continuous memory block into
+ * multiple parts. As a result, the number of memory regions is large.
+ */
+#ifdef CONFIG_EFI
+#define INIT_MEMBLOCK_MEMORY_REGIONS	(INIT_MEMBLOCK_REGIONS * 8)
 #endif
 
 #include <asm-generic/memory_model.h>

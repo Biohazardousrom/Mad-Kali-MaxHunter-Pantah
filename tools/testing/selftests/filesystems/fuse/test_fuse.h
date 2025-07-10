@@ -15,6 +15,7 @@
 #include <sys/statfs.h>
 #include <sys/types.h>
 
+#include <include/uapi/linux/android_fuse.h>
 #include <include/uapi/linux/fuse.h>
 
 #define PAGE_SIZE 4096
@@ -297,22 +298,32 @@ int delete_dir_tree(const char *dir_path, bool remove_root);
 		(bytes_in + sizeof(struct fuse_in_header))
 
 #define DECL_FUSE(name)							\
-	struct fuse_##name##_in *name##_in __attribute__((unused));	\
-	struct fuse_##name##_out *name##_out __attribute__((unused))
+	struct fuse_##name##_in *name##_in __maybe_unused;		\
+	struct fuse_##name##_out *name##_out __maybe_unused
 
-#define FUSE_ACTION	TEST(pid = fork(), pid != -1);			\
-			if (pid) {
+#define FUSE_DECLARE_DAEMON						\
+	int daemon = -1;						\
+	int status;							\
+	bool action;							\
+	uint8_t bytes_in[FUSE_MIN_READ_BUFFER] __maybe_unused;		\
+	uint8_t bytes_out[FUSE_MIN_READ_BUFFER]	__maybe_unused
 
-#define FUSE_DAEMON	} else {					\
-				uint8_t bytes_in[FUSE_MIN_READ_BUFFER]	\
-					__attribute__((unused));	\
-				uint8_t bytes_out[FUSE_MIN_READ_BUFFER]	\
-					__attribute__((unused));
+#define FUSE_START_DAEMON()						\
+	do {								\
+		TEST(daemon = fork(), daemon != -1);			\
+		action = daemon != 0;					\
+	} while (false)
 
-#define FUSE_DONE		exit(TEST_SUCCESS);			\
-			}						\
-			TESTEQUAL(waitpid(pid, &status, 0), pid);	\
-			TESTEQUAL(status, TEST_SUCCESS);
+#define FUSE_END_DAEMON()						\
+	do {								\
+		TESTEQUAL(waitpid(daemon, &status, 0), daemon);		\
+		TESTEQUAL(status, TEST_SUCCESS);			\
+		result = TEST_SUCCESS;					\
+out:									\
+		if (!daemon)						\
+			exit(TEST_FAILURE);				\
+	} while (false)
+
 
 struct map_relocation {
 	char *name;

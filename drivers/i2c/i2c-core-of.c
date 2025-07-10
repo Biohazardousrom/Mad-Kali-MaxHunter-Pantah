@@ -16,7 +16,6 @@
 #include <linux/of.h>
 #include <linux/of_device.h>
 #include <linux/sysfs.h>
-#include <trace/hooks/i2c.h>
 
 #include "i2c-core.h"
 
@@ -32,8 +31,6 @@ int of_i2c_get_board_info(struct device *dev, struct device_node *node,
 		dev_err(dev, "of_i2c: modalias failure on %pOF\n", node);
 		return -EINVAL;
 	}
-
-	trace_android_vh_of_i2c_get_board_info(node, &(info->dev_name));
 
 	ret = of_property_read_u32(node, "reg", &addr);
 	if (ret) {
@@ -247,6 +244,11 @@ static int of_i2c_notify(struct notifier_block *nb, unsigned long action,
 			return NOTIFY_OK;
 		}
 
+		/*
+		 * Clear the flag before adding the device so that fw_devlink
+		 * doesn't skip adding consumers to this device.
+		 */
+		rd->dn->fwnode.flags &= ~FWNODE_FLAG_NOT_DEVICE;
 		client = of_i2c_register_device(adap, rd->dn);
 		if (IS_ERR(client)) {
 			dev_err(&adap->dev, "failed to create client for '%pOF'\n",

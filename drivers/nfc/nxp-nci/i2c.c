@@ -293,7 +293,7 @@ static int nxp_nci_i2c_probe(struct i2c_client *client,
 		return PTR_ERR(phy->gpiod_en);
 	}
 
-	phy->gpiod_fw = devm_gpiod_get(dev, "firmware", GPIOD_OUT_LOW);
+	phy->gpiod_fw = devm_gpiod_get_optional(dev, "firmware", GPIOD_OUT_LOW);
 	if (IS_ERR(phy->gpiod_fw)) {
 		nfc_err(dev, "Failed to get FW gpio\n");
 		return PTR_ERR(phy->gpiod_fw);
@@ -314,14 +314,12 @@ static int nxp_nci_i2c_probe(struct i2c_client *client,
 	return r;
 }
 
-static int nxp_nci_i2c_remove(struct i2c_client *client)
+static void nxp_nci_i2c_remove(struct i2c_client *client)
 {
 	struct nxp_nci_i2c_phy *phy = i2c_get_clientdata(client);
 
 	nxp_nci_remove(phy->ndev);
 	free_irq(client->irq, phy);
-
-	return 0;
 }
 
 static const struct i2c_device_id nxp_nci_i2c_id_table[] = {

@@ -47,6 +47,36 @@ static inline unsigned int inner_tcp_hdrlen(const struct sk_buff *skb)
 	return inner_tcp_hdr(skb)->doff * 4;
 }
 
+/**
+ * skb_tcp_all_headers - Returns size of all headers for a TCP packet
+ * @skb: buffer
+ *
+ * Used in TX path, for a packet known to be a TCP one.
+ *
+ * if (skb_is_gso(skb)) {
+ *         int hlen = skb_tcp_all_headers(skb);
+ *         ...
+ */
+static inline int skb_tcp_all_headers(const struct sk_buff *skb)
+{
+	return skb_transport_offset(skb) + tcp_hdrlen(skb);
+}
+
+/**
+ * skb_inner_tcp_all_headers - Returns size of all headers for an encap TCP packet
+ * @skb: buffer
+ *
+ * Used in TX path, for a packet known to be a TCP one.
+ *
+ * if (skb_is_gso(skb) && skb->encapsulation) {
+ *         int hlen = skb_inner_tcp_all_headers(skb);
+ *         ...
+ */
+static inline int skb_inner_tcp_all_headers(const struct sk_buff *skb)
+{
+	return skb_inner_transport_offset(skb) + inner_tcp_hdrlen(skb);
+}
+
 static inline unsigned int tcp_optlen(const struct sk_buff *skb)
 {
 	return (tcp_hdr(skb)->doff - 5) * 4;
@@ -226,8 +256,7 @@ struct tcp_sock {
 	u8	compressed_ack;
 	u8	dup_ack_counter:2,
 		tlp_retrans:1,	/* TLP is a retransmission */
-		fast_ack_mode:2, /* which fast ack mode ? */
-		unused:3;
+		unused:5;
 	u32	chrono_start;	/* Start time in jiffies of a TCP chrono */
 	u32	chrono_stat[3];	/* Time in jiffies for chrono_stat stats */
 	u8	chrono_type:2,	/* current chronograph type */
@@ -267,12 +296,7 @@ struct tcp_sock {
 	u32	packets_out;	/* Packets which are "in flight"	*/
 	u32	retrans_out;	/* Retransmitted packets out		*/
 	u32	max_packets_out;  /* max packets_out in last window */
-	/* ANDROID:
-	 * max_packets_seq is really cwnd_usage_seq upstream, old name kept
-	 * to preserve ABI due to changes in commit 49d429760df7 ("tcp: fix
-	 * tcp_cwnd_validate() to not forget is_cwnd_limited")
-	 */
-	u32	max_packets_seq; /* right edge of cwnd usage tracking flight */
+	u32	cwnd_usage_seq;  /* right edge of cwnd usage tracking flight */
 
 	u16	urg_data;	/* Saved octet of OOB data and control flags */
 	u8	ecn_flags;	/* ECN status bits.			*/
@@ -365,6 +389,12 @@ struct tcp_sock {
 	u8	bpf_sock_ops_cb_flags;  /* Control calling BPF programs
 					 * values defined in uapi/linux/tcp.h
 					 */
+	u8	bpf_chg_cc_inprogress:1; /* In the middle of
+					  * bpf_setsockopt(TCP_CONGESTION),
+					  * it is to avoid the bpf_tcp_cc->init()
+					  * to recur itself by calling
+					  * bpf_setsockopt(TCP_CONGESTION, "itself").
+					  */
 #define BPF_SOCK_OPS_TEST_FLAG(TP, ARG) (TP->bpf_sock_ops_cb_flags & ARG)
 #else
 #define BPF_SOCK_OPS_TEST_FLAG(TP, ARG) 0
@@ -401,6 +431,7 @@ struct tcp_sock {
 	bool	is_mptcp;
 #endif
 #if IS_ENABLED(CONFIG_SMC)
+	bool	(*smc_hs_congested)(const struct sock *sk);
 	bool	syn_smc;	/* SYN includes SMC */
 #endif
 
@@ -419,9 +450,6 @@ struct tcp_sock {
 	 */
 	struct request_sock __rcu *fastopen_rsk;
 	struct saved_syn *saved_syn;
-
-/* Rerouting information */
-	u16	ecn_rehash;	/* PLB triggered rehash attempts */
 
 	ANDROID_KABI_RESERVE(1);
 };
@@ -508,7 +536,8 @@ static inline u32 tcp_saved_syn_len(const struct saved_syn *saved_syn)
 }
 
 struct sk_buff *tcp_get_timestamping_opt_stats(const struct sock *sk,
-					       const struct sk_buff *orig_skb);
+					       const struct sk_buff *orig_skb,
+					       const struct sk_buff *ack_skb);
 
 static inline u16 tcp_mss_clamp(const struct tcp_sock *tp, u16 mss)
 {
@@ -523,11 +552,13 @@ static inline u16 tcp_mss_clamp(const struct tcp_sock *tp, u16 mss)
 int tcp_skb_shift(struct sk_buff *to, struct sk_buff *from, int pcount,
 		  int shiftlen);
 
+void __tcp_sock_set_cork(struct sock *sk, bool on);
 void tcp_sock_set_cork(struct sock *sk, bool on);
 int tcp_sock_set_keepcnt(struct sock *sk, int val);
 int tcp_sock_set_keepidle_locked(struct sock *sk, int val);
 int tcp_sock_set_keepidle(struct sock *sk, int val);
 int tcp_sock_set_keepintvl(struct sock *sk, int val);
+void __tcp_sock_set_nodelay(struct sock *sk, bool on);
 void tcp_sock_set_nodelay(struct sock *sk);
 void tcp_sock_set_quickack(struct sock *sk, int val);
 int tcp_sock_set_syncnt(struct sock *sk, int val);

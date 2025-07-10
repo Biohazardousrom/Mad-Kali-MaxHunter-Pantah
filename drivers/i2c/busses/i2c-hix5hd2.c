@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (c) 2014 Linaro Ltd.
- * Copyright (c) 2014 Hisilicon Limited.
+ * Copyright (c) 2014 HiSilicon Limited.
  *
  * Now only support 7 bit address.
  */
@@ -423,7 +423,7 @@ static int hix5hd2_i2c_probe(struct platform_device *pdev)
 	}
 	clk_prepare_enable(priv->clk);
 
-	strlcpy(priv->adap.name, "hix5hd2-i2c", sizeof(priv->adap.name));
+	strscpy(priv->adap.name, "hix5hd2-i2c", sizeof(priv->adap.name));
 	priv->dev = &pdev->dev;
 	priv->adap.owner = THIS_MODULE;
 	priv->adap.algo = &hix5hd2_i2c_algorithm;

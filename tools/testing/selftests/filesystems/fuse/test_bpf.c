@@ -1,38 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-// Copyright (c) 2021 Google LLC
+// Copyright (c) 2022 Google LLC
 
-#define __EXPORTED_HEADERS__
+#include "test_fuse_bpf.h"
 
-#include <uapi/linux/types.h>
-#include <uapi/linux/fuse.h>
-#include <uapi/linux/errno.h>
-
-#include <stdbool.h>
-
-#define SEC(NAME) __attribute__((section(NAME), used))
-
-static long (*bpf_trace_printk)(const char *fmt, __u32 fmt_size, ...)
-	= (void *) 6;
-
-#define bpf_printk(fmt, ...)					\
-	({			                                \
-		char ____fmt[] = fmt;                           \
-		bpf_trace_printk(____fmt, sizeof(____fmt),      \
-		                 ##__VA_ARGS__);                \
-	})
-
-SEC("dummy")
-
-inline int strcmp(const char *a, const char *b)
-{
-	int i;
-
-	for (i = 0; i < __builtin_strlen(b) + 1; ++i)
-		if (a[i] != b[i])
-			return -1;
-
-	return 0;
-}
 SEC("test_readdir_redact")
 /* return FUSE_BPF_BACKING to use backing fs, 0 to pass to usermode */
 int readdir_test(struct fuse_bpf_args *fa)
@@ -549,7 +519,6 @@ int trace_test(struct fuse_bpf_args *fa)
 }
 
 SEC("test_hidden")
-
 int trace_hidden(struct fuse_bpf_args *fa)
 {
 	switch (fa->opcode) {
@@ -655,7 +624,6 @@ int trace_daemon(struct fuse_bpf_args *fa)
 }
 
 SEC("test_error")
-
 /* return FUSE_BPF_BACKING to use backing fs, 0 to pass to usermode */
 int error_test(struct fuse_bpf_args *fa)
 {
@@ -717,7 +685,7 @@ int readdirplus_test(struct fuse_bpf_args *fa)
 SEC("test_lookup_postfilter")
 int lookuppostfilter_test(struct fuse_bpf_args *fa)
 {
-	switch(fa->opcode) {
+	switch (fa->opcode) {
 	case FUSE_LOOKUP | FUSE_PREFILTER:
 		return FUSE_BPF_BACKING | FUSE_BPF_POST_FILTER;
 	case FUSE_LOOKUP | FUSE_POSTFILTER:

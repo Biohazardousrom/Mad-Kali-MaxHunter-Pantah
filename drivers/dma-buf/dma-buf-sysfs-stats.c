@@ -17,6 +17,40 @@
 
 #define to_dma_buf_entry_from_kobj(x) container_of(x, struct dma_buf_sysfs_entry, kobj)
 
+/**
+ * DOC: overview
+ *
+ * ``/sys/kernel/debug/dma_buf/bufinfo`` provides an overview of every DMA-BUF
+ * in the system. However, since debugfs is not safe to be mounted in
+ * production, procfs and sysfs can be used to gather DMA-BUF statistics on
+ * production systems.
+ *
+ * The ``/proc/<pid>/fdinfo/<fd>`` files in procfs can be used to gather
+ * information about DMA-BUF fds. Detailed documentation about the interface
+ * is present in Documentation/filesystems/proc.rst.
+ *
+ * Unfortunately, the existing procfs interfaces can only provide information
+ * about the DMA-BUFs for which processes hold fds or have the buffers mmapped
+ * into their address space. This necessitated the creation of the DMA-BUF sysfs
+ * statistics interface to provide per-buffer information on production systems.
+ *
+ * The interface at ``/sys/kernel/dma-buf/buffers`` exposes information about
+ * every DMA-BUF when ``CONFIG_DMABUF_SYSFS_STATS`` is enabled.
+ *
+ * The following stats are exposed by the interface:
+ *
+ * * ``/sys/kernel/dmabuf/buffers/<inode_number>/exporter_name``
+ * * ``/sys/kernel/dmabuf/buffers/<inode_number>/size``
+ *
+ * The information in the interface can also be used to derive per-exporter
+ * statistics. The data from the interface can be gathered on error conditions
+ * or other important events to provide a snapshot of DMA-BUF usage.
+ * It can also be collected periodically by telemetry to monitor various metrics.
+ *
+ * Detailed documentation about the interface is present in
+ * Documentation/ABI/testing/sysfs-kernel-dmabuf-buffers.
+ */
+
 struct dma_buf_stats_attribute {
 	struct attribute attr;
 	ssize_t (*show)(struct dma_buf *dmabuf,
@@ -97,10 +131,9 @@ void dma_buf_stats_teardown(struct dma_buf *dmabuf)
 	kobject_put(&sysfs_entry->kobj);
 }
 
-/*
- * Statistics files do not need to send uevents.
- */
-static int dmabuf_sysfs_uevent_filter(struct kset *kset, struct kobject *kobj)
+
+/* Statistics files do not need to send uevents. */
+static int dmabuf_sysfs_uevent_filter(struct kobject *kobj)
 {
 	return 0;
 }
@@ -136,15 +169,21 @@ void dma_buf_uninit_sysfs_statistics(void)
 	kset_unregister(dma_buf_stats_kset);
 }
 
+struct dma_buf_create_sysfs_entry {
+	struct dma_buf *dmabuf;
+	struct work_struct work;
+};
+
+union dma_buf_create_sysfs_work_entry {
+	struct dma_buf_create_sysfs_entry create_entry;
+	struct dma_buf_sysfs_entry sysfs_entry;
+};
+
 static void sysfs_add_workfn(struct work_struct *work)
 {
-	/* The ABI would have to change for this to be false, but let's be paranoid. */
-	_Static_assert(sizeof(struct kobject) >= sizeof(struct work_struct),
-		"kobject is smaller than work_struct");
-
-	struct dma_buf_sysfs_entry *sysfs_entry =
-		container_of((struct kobject *)work, struct dma_buf_sysfs_entry, kobj);
-	struct dma_buf *dmabuf = sysfs_entry->dmabuf;
+	struct dma_buf_create_sysfs_entry *create_entry =
+		container_of(work, struct dma_buf_create_sysfs_entry, work);
+	struct dma_buf *dmabuf = create_entry->dmabuf;
 
 	/*
 	 * A dmabuf is ref-counted via its file member. If this handler holds the only
@@ -155,9 +194,10 @@ static void sysfs_add_workfn(struct work_struct *work)
 	 * is released, and that can't happen until the end of this function.
 	 */
 	if (file_count(dmabuf->file) > 1) {
+		dmabuf->sysfs_entry->dmabuf = dmabuf;
 		/*
 		 * kobject_init_and_add expects kobject to be zero-filled, but we have populated it
-		 * to trigger this work function.
+		 * (the sysfs_add_work union member) to trigger this work function.
 		 */
 		memset(&dmabuf->sysfs_entry->kobj, 0, sizeof(dmabuf->sysfs_entry->kobj));
 		dmabuf->sysfs_entry->kobj.kset = dma_buf_per_buffer_stats_kset;
@@ -177,34 +217,28 @@ static void sysfs_add_workfn(struct work_struct *work)
 	dma_buf_put(dmabuf);
 }
 
-int dma_buf_stats_setup(struct dma_buf *dmabuf)
+int dma_buf_stats_setup(struct dma_buf *dmabuf, struct file *file)
 {
-	struct dma_buf_sysfs_entry *sysfs_entry;
-	struct work_struct *work;
-
-	if (!dmabuf || !dmabuf->file)
-		return -EINVAL;
+	struct dma_buf_create_sysfs_entry *create_entry;
+	union dma_buf_create_sysfs_work_entry *work_entry;
 
 	if (!dmabuf->exp_name) {
 		pr_err("exporter name must not be empty if stats needed\n");
 		return -EINVAL;
 	}
 
-	sysfs_entry = kmalloc(sizeof(struct dma_buf_sysfs_entry), GFP_KERNEL);
-	if (!sysfs_entry)
+	work_entry = kmalloc(sizeof(union dma_buf_create_sysfs_work_entry), GFP_KERNEL);
+	if (!work_entry)
 		return -ENOMEM;
 
-	sysfs_entry->dmabuf = dmabuf;
-	dmabuf->sysfs_entry = sysfs_entry;
+	dmabuf->sysfs_entry = &work_entry->sysfs_entry;
 
-	/*
-	 * The use of kobj as a work_struct is an ugly hack
-	 * to avoid an ABI break in this frozen kernel.
-	 */
-	work = (struct work_struct *)&dmabuf->sysfs_entry->kobj;
-	INIT_WORK(work, sysfs_add_workfn);
+	create_entry = &work_entry->create_entry;
+	create_entry->dmabuf = dmabuf;
+
+	INIT_WORK(&create_entry->work, sysfs_add_workfn);
 	get_dma_buf(dmabuf); /* This reference will be dropped in sysfs_add_workfn. */
-	schedule_work(work);
+	schedule_work(&create_entry->work);
 
 	return 0;
 }

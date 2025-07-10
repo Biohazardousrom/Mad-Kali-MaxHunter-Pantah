@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: GPL-2.0
 # Makefile for vm selftests
+
+LOCAL_HDRS += $(top_srcdir)/mm/gup_test.h
+
 uname_M := $(shell uname -m 2>/dev/null || echo not)
 MACHINE ?= $(shell echo $(uname_M) | sed -e 's/aarch64.*/arm64/' -e 's/ppc64.*/ppc64/')
 
@@ -20,24 +23,35 @@ MACHINE ?= $(shell echo $(uname_M) | sed -e 's/aarch64.*/arm64/' -e 's/ppc64.*/p
 # LDLIBS.
 MAKEFLAGS += --no-builtin-rules
 
-CFLAGS = -Wall -I ../../../../usr/include $(EXTRA_CFLAGS)
-LDLIBS = -lrt
+CFLAGS = -Wall -I $(top_srcdir) $(EXTRA_CFLAGS) $(KHDR_INCLUDES)
+LDLIBS = -lrt -lpthread
 TEST_GEN_FILES = compaction_test
-TEST_GEN_FILES += gup_benchmark
+TEST_GEN_FILES += gup_test
 TEST_GEN_FILES += hmm-tests
+TEST_GEN_FILES += hugetlb-madvise
 TEST_GEN_FILES += hugepage-mmap
+TEST_GEN_FILES += hugepage-mremap
 TEST_GEN_FILES += hugepage-shm
-TEST_GEN_FILES += map_hugetlb
+TEST_GEN_FILES += hugepage-vmemmap
+TEST_GEN_FILES += khugepaged
+TEST_GEN_PROGS = madv_populate
 TEST_GEN_FILES += map_fixed_noreplace
+TEST_GEN_FILES += map_hugetlb
 TEST_GEN_FILES += map_populate
+TEST_GEN_FILES += memfd_secret
+TEST_GEN_FILES += migration
 TEST_GEN_FILES += mlock-random-test
 TEST_GEN_FILES += mlock2-tests
+TEST_GEN_FILES += mrelease_test
 TEST_GEN_FILES += mremap_dontunmap
+TEST_GEN_FILES += mremap_test
 TEST_GEN_FILES += on-fault-limit
 TEST_GEN_FILES += thuge-gen
 TEST_GEN_FILES += transhuge-stress
 TEST_GEN_FILES += userfaultfd
-TEST_GEN_FILES += khugepaged
+TEST_GEN_PROGS += soft-dirty
+TEST_GEN_PROGS += split_huge_page_test
+TEST_GEN_FILES += ksm_tests
 
 ifeq ($(MACHINE),x86_64)
 CAN_BUILD_I386 := $(shell ./../x86/check_cc.sh "$(CC)" ../x86/trivial_32bit_program.c -m32)
@@ -73,14 +87,19 @@ TEST_GEN_FILES += virtual_address_range
 TEST_GEN_FILES += write_to_hugetlbfs
 endif
 
-TEST_PROGS := run_vmtests
+TEST_PROGS := run_vmtests.sh
 
 TEST_FILES := test_vmalloc.sh
+TEST_FILES += test_hmm.sh
+TEST_FILES += va_128TBswitch.sh
 
-KSFT_KHDR_INSTALL := 1
 include ../lib.mk
 
-$(OUTPUT)/hmm-tests: LDLIBS += -lhugetlbfs -lpthread
+$(OUTPUT)/khugepaged: vm_util.c
+$(OUTPUT)/madv_populate: vm_util.c
+$(OUTPUT)/soft-dirty: vm_util.c
+$(OUTPUT)/split_huge_page_test: vm_util.c
+$(OUTPUT)/userfaultfd: vm_util.c
 
 ifeq ($(MACHINE),x86_64)
 BINARIES_32 := $(patsubst %,$(OUTPUT)/%,$(BINARIES_32))
@@ -97,7 +116,7 @@ $(1) $(1)_64: $(OUTPUT)/$(1)_64
 endef
 
 ifeq ($(CAN_BUILD_I386),1)
-$(BINARIES_32): CFLAGS += -m32
+$(BINARIES_32): CFLAGS += -m32 -mxsave
 $(BINARIES_32): LDLIBS += -lrt -ldl -lm
 $(BINARIES_32): $(OUTPUT)/%_32: %.c
 	$(CC) $(CFLAGS) $(EXTRA_CFLAGS) $(notdir $^) $(LDLIBS) -o $@
@@ -105,7 +124,7 @@ $(foreach t,$(VMTARGETS),$(eval $(call gen-target-rule-32,$(t))))
 endif
 
 ifeq ($(CAN_BUILD_X86_64),1)
-$(BINARIES_64): CFLAGS += -m64
+$(BINARIES_64): CFLAGS += -m64 -mxsave
 $(BINARIES_64): LDLIBS += -lrt -ldl
 $(BINARIES_64): $(OUTPUT)/%_64: %.c
 	$(CC) $(CFLAGS) $(EXTRA_CFLAGS) $(notdir $^) $(LDLIBS) -o $@
@@ -131,6 +150,8 @@ warn_32bit_failure:
 endif
 endif
 
-$(OUTPUT)/userfaultfd: LDLIBS += -lpthread
+$(OUTPUT)/mlock-random-test $(OUTPUT)/memfd_secret: LDLIBS += -lcap
 
-$(OUTPUT)/mlock-random-test: LDLIBS += -lcap
+$(OUTPUT)/ksm_tests: LDLIBS += -lnuma
+
+$(OUTPUT)/migration: LDLIBS += -lnuma

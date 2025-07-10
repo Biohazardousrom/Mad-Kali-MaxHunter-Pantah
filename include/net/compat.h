@@ -5,8 +5,6 @@
 
 struct sock;
 
-#if defined(CONFIG_COMPAT)
-
 #include <linux/compat.h>
 
 struct compat_msghdr {
@@ -48,17 +46,8 @@ struct compat_rtentry {
 	unsigned short  rt_irtt;        /* Initial RTT                  */
 };
 
-#else /* defined(CONFIG_COMPAT) */
-/*
- * To avoid compiler warnings:
- */
-#define compat_msghdr	msghdr
-#define compat_mmsghdr	mmsghdr
-#endif /* defined(CONFIG_COMPAT) */
-
-int __get_compat_msghdr(struct msghdr *kmsg, struct compat_msghdr __user *umsg,
-			struct sockaddr __user **save_addr, compat_uptr_t *ptr,
-			compat_size_t *len);
+int __get_compat_msghdr(struct msghdr *kmsg, struct compat_msghdr *msg,
+			struct sockaddr __user **save_addr);
 int get_compat_msghdr(struct msghdr *, struct compat_msghdr __user *,
 		      struct sockaddr __user **, struct iovec **);
 int put_cmsg_compat(struct msghdr*, int, int, int, void *);

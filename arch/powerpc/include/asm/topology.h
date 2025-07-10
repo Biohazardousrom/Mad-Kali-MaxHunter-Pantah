@@ -66,6 +66,11 @@ static inline int early_cpu_to_node(int cpu)
 int of_drconf_to_nid_single(struct drmem_lmb *lmb);
 void update_numa_distance(struct device_node *node);
 
+extern void map_cpu_to_node(int cpu, int node);
+#ifdef CONFIG_HOTPLUG_CPU
+extern void unmap_cpu_from_node(unsigned long cpu);
+#endif /* CONFIG_HOTPLUG_CPU */
+
 #else
 
 static inline int early_cpu_to_node(int cpu) { return 0; }
@@ -95,17 +100,21 @@ static inline int of_drconf_to_nid_single(struct drmem_lmb *lmb)
 }
 
 static inline void update_numa_distance(struct device_node *node) {}
+
+#ifdef CONFIG_SMP
+static inline void map_cpu_to_node(int cpu, int node) {}
+#ifdef CONFIG_HOTPLUG_CPU
+static inline void unmap_cpu_from_node(unsigned long cpu) {}
+#endif /* CONFIG_HOTPLUG_CPU */
+#endif /* CONFIG_SMP */
+
 #endif /* CONFIG_NUMA */
 
 #if defined(CONFIG_NUMA) && defined(CONFIG_PPC_SPLPAR)
-extern int find_and_online_cpu_nid(int cpu);
+void find_and_update_cpu_nid(int cpu);
 extern int cpu_to_coregroup_id(int cpu);
 #else
-static inline int find_and_online_cpu_nid(int cpu)
-{
-	return 0;
-}
-
+static inline void find_and_update_cpu_nid(int cpu) {}
 static inline int cpu_to_coregroup_id(int cpu)
 {
 #ifdef CONFIG_SMP
@@ -128,7 +137,7 @@ static inline int cpu_to_coregroup_id(int cpu)
 #define topology_physical_package_id(cpu)	(cpu_to_chip_id(cpu))
 
 #define topology_sibling_cpumask(cpu)	(per_cpu(cpu_sibling_map, cpu))
-#define topology_core_cpumask(cpu)	(cpu_cpu_mask(cpu))
+#define topology_core_cpumask(cpu)	(per_cpu(cpu_core_map, cpu))
 #define topology_core_id(cpu)		(cpu_to_core_id(cpu))
 
 #endif

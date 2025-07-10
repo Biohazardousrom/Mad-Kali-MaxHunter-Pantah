@@ -63,6 +63,9 @@
 #define ARM_SMCCC_VERSION_1_0		0x10000
 #define ARM_SMCCC_VERSION_1_1		0x10001
 #define ARM_SMCCC_VERSION_1_2		0x10002
+#define ARM_SMCCC_VERSION_1_3		0x10003
+
+#define ARM_SMCCC_1_3_SVE_HINT		0x10000
 
 #define ARM_SMCCC_VERSION_FUNC_ID					\
 	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL,				\
@@ -89,6 +92,11 @@
 			   ARM_SMCCC_SMC_32,				\
 			   0, 0x7fff)
 
+#define ARM_SMCCC_ARCH_WORKAROUND_3					\
+	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL,				\
+			   ARM_SMCCC_SMC_32,				\
+			   0, 0x3fff)
+
 #define ARM_SMCCC_VENDOR_HYP_CALL_UID_FUNC_ID				\
 	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL,				\
 			   ARM_SMCCC_SMC_32,				\
@@ -111,6 +119,7 @@
 #define ARM_SMCCC_KVM_FUNC_MMIO_GUARD_ENROLL	6
 #define ARM_SMCCC_KVM_FUNC_MMIO_GUARD_MAP	7
 #define ARM_SMCCC_KVM_FUNC_MMIO_GUARD_UNMAP	8
+#define ARM_SMCCC_KVM_FUNC_MEM_RELINQUISH	9
 #define ARM_SMCCC_KVM_FUNC_FEATURES_2		127
 #define ARM_SMCCC_KVM_NUM_FUNCS			128
 
@@ -119,11 +128,6 @@
 			   ARM_SMCCC_SMC_32,				\
 			   ARM_SMCCC_OWNER_VENDOR_HYP,			\
 			   ARM_SMCCC_KVM_FUNC_FEATURES)
-
-#define ARM_SMCCC_ARCH_WORKAROUND_3					\
-	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL,				\
-			   ARM_SMCCC_SMC_32,				\
-			   0, 0x3fff)
 
 #define SMCCC_ARCH_WORKAROUND_RET_UNAFFECTED	1
 
@@ -155,6 +159,12 @@
 			   ARM_SMCCC_SMC_64,				\
 			   ARM_SMCCC_OWNER_VENDOR_HYP,			\
 			   ARM_SMCCC_KVM_FUNC_MEM_UNSHARE)
+
+#define ARM_SMCCC_VENDOR_HYP_KVM_MEM_RELINQUISH_FUNC_ID			\
+	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL,				\
+			   ARM_SMCCC_SMC_64,				\
+			   ARM_SMCCC_OWNER_VENDOR_HYP,			\
+			   ARM_SMCCC_KVM_FUNC_MEM_RELINQUISH)
 
 /* ptp_kvm counter type ID */
 #define KVM_PTP_VIRT_COUNTER			0
@@ -270,6 +280,8 @@ u32 arm_smccc_get_version(void);
 
 void __init arm_smccc_version_init(u32 version, enum arm_smccc_conduit conduit);
 
+extern u64 smccc_has_sve_hint;
+
 /**
  * struct arm_smccc_res - Result from SMC/HVC call
  * @a0-a3 result values from registers 0 to 3
@@ -350,6 +362,15 @@ struct arm_smccc_quirk {
 };
 
 /**
+ * __arm_smccc_sve_check() - Set the SVE hint bit when doing SMC calls
+ *
+ * Sets the SMCCC hint bit to indicate if there is live state in the SVE
+ * registers, this modifies x0 in place and should never be called from C
+ * code.
+ */
+asmlinkage unsigned long __arm_smccc_sve_check(unsigned long x0);
+
+/**
  * __arm_smccc_smc() - make SMC calls
  * @a0-a7: arguments passed in registers 0 to 7
  * @res: result values from registers 0 to 3
@@ -361,10 +382,20 @@ struct arm_smccc_quirk {
  * from register 0 to 3 on return from the SMC instruction.  An optional
  * quirk structure provides vendor specific behavior.
  */
+#ifdef CONFIG_HAVE_ARM_SMCCC
 asmlinkage void __arm_smccc_smc(unsigned long a0, unsigned long a1,
 			unsigned long a2, unsigned long a3, unsigned long a4,
 			unsigned long a5, unsigned long a6, unsigned long a7,
 			struct arm_smccc_res *res, struct arm_smccc_quirk *quirk);
+#else
+static inline void __arm_smccc_smc(unsigned long a0, unsigned long a1,
+			unsigned long a2, unsigned long a3, unsigned long a4,
+			unsigned long a5, unsigned long a6, unsigned long a7,
+			struct arm_smccc_res *res, struct arm_smccc_quirk *quirk)
+{
+	*res = (struct arm_smccc_res){};
+}
+#endif
 
 /**
  * __arm_smccc_hvc() - make HVC calls
@@ -403,6 +434,20 @@ asmlinkage void __arm_smccc_hvc(unsigned long a0, unsigned long a1,
 
 #define SMCCC_SMC_INST	__SMC(0)
 #define SMCCC_HVC_INST	__HVC(0)
+
+#endif
+
+/* nVHE hypervisor doesn't have a current thread so needs separate checks */
+#if defined(CONFIG_ARM64_SVE) && !defined(__KVM_NVHE_HYPERVISOR__)
+
+#define SMCCC_SVE_CHECK ALTERNATIVE("nop \n",  "bl __arm_smccc_sve_check \n", \
+				    ARM64_SVE)
+#define smccc_sve_clobbers "x16", "x30", "cc",
+
+#else
+
+#define SMCCC_SVE_CHECK
+#define smccc_sve_clobbers
 
 #endif
 
@@ -473,7 +518,7 @@ asmlinkage void __arm_smccc_hvc(unsigned long a0, unsigned long a1,
 
 #define ___constraints(count)						\
 	: __constraint_read_ ## count					\
-	: "memory"
+	: smccc_sve_clobbers "memory"
 #define __constraints(count)	___constraints(count)
 
 /*
@@ -488,7 +533,8 @@ asmlinkage void __arm_smccc_hvc(unsigned long a0, unsigned long a1,
 		register unsigned long r2 asm("r2");			\
 		register unsigned long r3 asm("r3"); 			\
 		__declare_args(__count_args(__VA_ARGS__), __VA_ARGS__);	\
-		asm volatile(inst "\n" :				\
+		asm volatile(SMCCC_SVE_CHECK				\
+			     inst "\n" :				\
 			     "=r" (r0), "=r" (r1), "=r" (r2), "=r" (r3)	\
 			     __constraints(__count_args(__VA_ARGS__)));	\
 		if (___res)						\

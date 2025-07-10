@@ -12,6 +12,8 @@
 	aliases: aliases {
 		ethernet1 = &eth1;
 		ethernet2 = &eth2;
+		mmc0 = &usdhc3;
+		mmc1 = &usdhc4;
 	};
 
 	backlight: backlight {
@@ -53,6 +55,7 @@
 	panel: panel {
 		compatible = "dataimage,scf0700c48ggu18";
 		power-supply = <&sw2_reg>;
+		backlight = <&backlight>;
 		status = "disabled";
 
 		port {
@@ -277,7 +280,7 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 
-		chan@0 {
+		led@0 {
 			chan-name = "R";
 			led-cur = /bits/ 8 <0x20>;
 			max-cur = /bits/ 8 <0x60>;
@@ -285,7 +288,7 @@
 			color = <LED_COLOR_ID_RED>;
 		};
 
-		chan@1 {
+		led@1 {
 			chan-name = "G";
 			led-cur = /bits/ 8 <0x20>;
 			max-cur = /bits/ 8 <0x60>;
@@ -293,20 +296,12 @@
 			color = <LED_COLOR_ID_GREEN>;
 		};
 
-		chan@2 {
+		led@2 {
 			chan-name = "B";
 			led-cur = /bits/ 8 <0x20>;
 			max-cur = /bits/ 8 <0x60>;
 			reg = <2>;
 			color = <LED_COLOR_ID_BLUE>;
-		};
-
-		chan@3 {
-			chan-name = "W";
-			led-cur = /bits/ 8 <0x0>;
-			max-cur = /bits/ 8 <0x0>;
-			reg = <3>;
-			color = <LED_COLOR_ID_WHITE>;
 		};
 	};
 
@@ -356,6 +351,7 @@
 		solomon,height = <64>;
 		solomon,width = <128>;
 		solomon,page-offset = <0>;
+		solomon,col-offset = <4>;
 		solomon,prechargep2 = <15>;
 		reset-gpios = <&gpio_oled 1 GPIO_ACTIVE_LOW>;
 		vbat-supply = <&sw2_reg>;

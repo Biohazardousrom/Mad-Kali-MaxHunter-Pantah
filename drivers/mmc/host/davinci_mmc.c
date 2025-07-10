@@ -290,7 +290,7 @@ static void mmc_davinci_start_command(struct mmc_davinci_host *host,
 		default:
 			s = ", (R? response)";
 			break;
-		}; s; }));
+		} s; }));
 	host->cmd = cmd;
 
 	switch (mmc_resp_type(cmd)) {
@@ -1189,7 +1189,6 @@ static int mmc_davinci_parse_pdata(struct mmc_host *mmc)
 
 static int davinci_mmcsd_probe(struct platform_device *pdev)
 {
-	const struct of_device_id *match;
 	struct mmc_davinci_host *host = NULL;
 	struct mmc_host *mmc = NULL;
 	struct resource *r, *mem = NULL;
@@ -1235,9 +1234,8 @@ static int davinci_mmcsd_probe(struct platform_device *pdev)
 
 	host->mmc_input_clk = clk_get_rate(host->clk);
 
-	match = of_match_device(davinci_mmc_dt_ids, &pdev->dev);
-	if (match) {
-		pdev->id_entry = match->data;
+	pdev->id_entry = of_device_get_match_data(&pdev->dev);
+	if (pdev->id_entry) {
 		ret = mmc_of_parse(mmc);
 		if (ret) {
 			dev_err_probe(&pdev->dev, ret,
@@ -1347,7 +1345,7 @@ ioremap_fail:
 	return ret;
 }
 
-static int __exit davinci_mmcsd_remove(struct platform_device *pdev)
+static int davinci_mmcsd_remove(struct platform_device *pdev)
 {
 	struct mmc_davinci_host *host = platform_get_drvdata(pdev);
 
@@ -1404,7 +1402,7 @@ static struct platform_driver davinci_mmcsd_driver = {
 		.of_match_table = davinci_mmc_dt_ids,
 	},
 	.probe		= davinci_mmcsd_probe,
-	.remove		= __exit_p(davinci_mmcsd_remove),
+	.remove		= davinci_mmcsd_remove,
 	.id_table	= davinci_mmc_devtype,
 };
 

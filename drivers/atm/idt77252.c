@@ -1784,12 +1784,6 @@ set_tct(struct idt77252_dev *card, struct vc_map *vc)
 /*****************************************************************************/
 
 static __inline__ int
-idt77252_fbq_level(struct idt77252_dev *card, int queue)
-{
-	return (readl(SAR_REG_STAT) >> (16 + (queue << 2))) & 0x0f;
-}
-
-static __inline__ int
 idt77252_fbq_full(struct idt77252_dev *card, int queue)
 {
 	return (readl(SAR_REG_STAT) >> (16 + (queue << 2))) == 0x0f;
@@ -3555,7 +3549,7 @@ static int idt77252_preset(struct idt77252_dev *card)
 		return -1;
 	}
 	if (!(pci_command & PCI_COMMAND_IO)) {
-		printk("%s: PCI_COMMAND: %04x (???)\n",
+		printk("%s: PCI_COMMAND: %04x (?)\n",
 		       card->name, pci_command);
 		deinit_card(card);
 		return (-1);
@@ -3756,16 +3750,7 @@ static int __init idt77252_init(void)
 	struct sk_buff *skb;
 
 	printk("%s: at %p\n", __func__, idt77252_init);
-
-	if (sizeof(skb->cb) < sizeof(struct atm_skb_data) +
-			      sizeof(struct idt77252_skb_prv)) {
-		printk(KERN_ERR "%s: skb->cb is too small (%lu < %lu)\n",
-		       __func__, (unsigned long) sizeof(skb->cb),
-		       (unsigned long) sizeof(struct atm_skb_data) +
-				       sizeof(struct idt77252_skb_prv));
-		return -EIO;
-	}
-
+	BUILD_BUG_ON(sizeof(skb->cb) < sizeof(struct idt77252_skb_prv) + sizeof(struct atm_skb_data));
 	return pci_register_driver(&idt77252_driver);
 }
 

@@ -10,9 +10,8 @@
  * mechanism for vendor modules to hook and extend functionality
  */
 struct ufs_hba;
-struct ufshcd_lrb;
-struct uic_command;
 struct request;
+struct ufshcd_lrb;
 struct scsi_device;
 
 DECLARE_HOOK(android_vh_ufs_fill_prdt,
@@ -20,13 +19,13 @@ DECLARE_HOOK(android_vh_ufs_fill_prdt,
 		 unsigned int segments, int *err),
 	TP_ARGS(hba, lrbp, segments, err));
 
-DECLARE_RESTRICTED_HOOK(android_rvh_ufs_complete_init,
-			TP_PROTO(struct ufs_hba *hba),
-			TP_ARGS(hba), 1);
-
 DECLARE_RESTRICTED_HOOK(android_rvh_ufs_reprogram_all_keys,
 			TP_PROTO(struct ufs_hba *hba, int *err),
 			TP_ARGS(hba, err), 1);
+
+DECLARE_RESTRICTED_HOOK(android_rvh_ufs_complete_init,
+			TP_PROTO(struct ufs_hba *hba),
+			TP_ARGS(hba), 1);
 
 DECLARE_HOOK(android_vh_ufs_prepare_command,
 	TP_PROTO(struct ufs_hba *hba, struct request *rq,
@@ -45,14 +44,15 @@ DECLARE_HOOK(android_vh_ufs_compl_command,
 	TP_PROTO(struct ufs_hba *hba, struct ufshcd_lrb *lrbp),
 	TP_ARGS(hba, lrbp));
 
+struct uic_command;
 DECLARE_HOOK(android_vh_ufs_send_uic_command,
-	TP_PROTO(struct ufs_hba *hba, struct uic_command *ucmd,
-		 const char *str),
-	TP_ARGS(hba, ucmd, str));
+	TP_PROTO(struct ufs_hba *hba, const struct uic_command *ucmd,
+		 int str_t),
+	TP_ARGS(hba, ucmd, str_t));
 
 DECLARE_HOOK(android_vh_ufs_send_tm_command,
-	TP_PROTO(struct ufs_hba *hba, int tag, const char *str),
-	TP_ARGS(hba, tag, str));
+	TP_PROTO(struct ufs_hba *hba, int tag, int str_t),
+	TP_ARGS(hba, tag, str_t));
 
 DECLARE_HOOK(android_vh_ufs_check_int_errors,
 	TP_PROTO(struct ufs_hba *hba, bool queue_eh_work),
@@ -63,8 +63,17 @@ DECLARE_HOOK(android_vh_ufs_update_sdev,
 	TP_ARGS(sdev));
 
 DECLARE_HOOK(android_vh_ufs_clock_scaling,
-	TP_PROTO(struct ufs_hba *hba, bool *force_out, bool *force_scaling, bool *scale_up),
-	TP_ARGS(hba, force_out, force_scaling, scale_up));
+		TP_PROTO(struct ufs_hba *hba, bool *force_out, bool *force_scaling, bool *scale_up),
+		TP_ARGS(hba, force_out, force_scaling, scale_up));
+
+DECLARE_HOOK(android_vh_ufs_use_mcq_hooks,
+		TP_PROTO(struct ufs_hba *hba, bool *use_mcq),
+		TP_ARGS(hba, use_mcq));
+
+struct scsi_cmnd;
+DECLARE_HOOK(android_vh_ufs_mcq_abort,
+	TP_PROTO(struct ufs_hba *hba, struct scsi_cmnd *cmd, int *ret),
+	TP_ARGS(hba, cmd, ret));
 #endif /* _TRACE_HOOK_UFSHCD_H */
 /* This part must be outside protection */
 #include <trace/define_trace.h>

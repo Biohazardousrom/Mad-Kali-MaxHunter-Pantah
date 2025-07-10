@@ -49,6 +49,17 @@ config NFC_PORT100
 
 	  If unsure, say N.
 
+config NFC_VIRTUAL_NCI
+	tristate "NCI device simulator driver"
+	depends on NFC_NCI
+	help
+	  NCI virtual device simulates a NCI device to the user.
+	  It can be used to validate the NCI module and applications.
+	  This driver supports communication between the virtual NCI device and
+	  module.
+
+	  If unsure, say N.
+
 source "drivers/nfc/fdp/Kconfig"
 source "drivers/nfc/pn544/Kconfig"
 source "drivers/nfc/pn533/Kconfig"
@@ -60,27 +71,3 @@ source "drivers/nfc/nxp-nci/Kconfig"
 source "drivers/nfc/s3fwrn5/Kconfig"
 source "drivers/nfc/st95hf/Kconfig"
 endmenu
-
-config NFC_ST21NFC
-	tristate "ST Microelectronics ST21NFC NFC Controller Driver"
-	depends on I2C
-	help
-	 ST Microelectronics ST21NFC Near Field Communication controller support.
-
-config NFC_ST21NFC_NO_CRYSTAL
-	bool "ST Microelectronics ST21NFC NFC Controller Driver, no external crystal"
-	depends on NFC_ST21NFC
-	help
-	 ST Microelectronics ST21NFC Near Field Communication controller support.
-
-config ESE_ST54
-	tristate "ST Microelectronics ST54 family ESE driver"
-	depends on SPI
-	help
-	  ST Microelectronics ST54 ESE Near Field Communication controller support.
-
-config ESE_ST33
-	tristate "ST Microelectronics ST33 ESE driver"
-	depends on SPI
-	help
-	  ST Microelectronics ST33 ESE Near Field Communication controller support.

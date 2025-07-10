@@ -24,4 +24,3 @@ DECLARE_HOOK(android_vh_early_resume_begin,
 #endif /* _TRACE_HOOK_SUSPEND_H */
 /* This part must be outside protection */
 #include <trace/define_trace.h>
-

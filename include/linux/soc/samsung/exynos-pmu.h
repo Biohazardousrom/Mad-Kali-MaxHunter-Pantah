@@ -20,11 +20,11 @@ enum sys_powerdown {
 
 extern void exynos_sys_powerdown_conf(enum sys_powerdown mode);
 #ifdef CONFIG_EXYNOS_PMU
-int exynos_pmu_write(unsigned int offset, unsigned int val);
+extern struct regmap *exynos_get_pmu_regmap(void);
 #else
-static int exynos_pmu_write(unsigned int offset, unsigned int val)
+static inline struct regmap *exynos_get_pmu_regmap(void)
 {
-	return -ENODEV;
+	return ERR_PTR(-ENODEV);
 }
 #endif
 

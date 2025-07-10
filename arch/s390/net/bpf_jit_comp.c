@@ -7,7 +7,6 @@
  *  - HAVE_MARCH_Z196_FEATURES: laal, laalg
  *  - HAVE_MARCH_Z10_FEATURES: msfi, cgrj, clgrj
  *  - HAVE_MARCH_Z9_109_FEATURES: alfi, llilf, clfi, oilf, nilf
- *  - PACK_STACK
  *  - 64BIT
  *
  * Copyright IBM Corp. 2012,2015
@@ -26,6 +25,7 @@
 #include <linux/mm.h>
 #include <linux/kernel.h>
 #include <asm/cacheflush.h>
+#include <asm/extable.h>
 #include <asm/dis.h>
 #include <asm/facility.h>
 #include <asm/nospec-branch.h>
@@ -567,42 +567,27 @@ static void bpf_jit_epilogue(struct bpf_jit *jit, u32 stack_depth)
 	EMIT4(0xb9040000, REG_2, BPF_REG_0);
 	/* Restore registers */
 	save_restore_regs(jit, REGS_RESTORE, stack_depth);
-	if (__is_defined(CC_USING_EXPOLINE) && !nospec_disable) {
+	if (nospec_uses_trampoline()) {
 		jit->r14_thunk_ip = jit->prg;
 		/* Generate __s390_indirect_jump_r14 thunk */
-		if (test_facility(35)) {
-			/* exrl %r0,.+10 */
-			EMIT6_PCREL_RIL(0xc6000000, jit->prg + 10);
-		} else {
-			/* larl %r1,.+14 */
-			EMIT6_PCREL_RILB(0xc0000000, REG_1, jit->prg + 14);
-			/* ex 0,0(%r1) */
-			EMIT4_DISP(0x44000000, REG_0, REG_1, 0);
-		}
+		/* exrl %r0,.+10 */
+		EMIT6_PCREL_RIL(0xc6000000, jit->prg + 10);
 		/* j . */
 		EMIT4_PCREL(0xa7f40000, 0);
 	}
 	/* br %r14 */
 	_EMIT2(0x07fe);
 
-	if (__is_defined(CC_USING_EXPOLINE) && !nospec_disable &&
+	if ((nospec_uses_trampoline()) &&
 	    (is_first_pass(jit) || (jit->seen & SEEN_FUNC))) {
 		jit->r1_thunk_ip = jit->prg;
 		/* Generate __s390_indirect_jump_r1 thunk */
-		if (test_facility(35)) {
-			/* exrl %r0,.+10 */
-			EMIT6_PCREL_RIL(0xc6000000, jit->prg + 10);
-			/* j . */
-			EMIT4_PCREL(0xa7f40000, 0);
-			/* br %r1 */
-			_EMIT2(0x07f1);
-		} else {
-			/* ex 0,S390_lowcore.br_r1_tampoline */
-			EMIT4_DISP(0x44000000, REG_0, REG_0,
-				   offsetof(struct lowcore, br_r1_trampoline));
-			/* j . */
-			EMIT4_PCREL(0xa7f40000, 0);
-		}
+		/* exrl %r0,.+10 */
+		EMIT6_PCREL_RIL(0xc6000000, jit->prg + 10);
+		/* j . */
+		EMIT4_PCREL(0xa7f40000, 0);
+		/* br %r1 */
+		_EMIT2(0x07f1);
 	}
 }
 
@@ -622,19 +607,10 @@ static int get_probe_mem_regno(const u8 *insn)
 	return insn[1] >> 4;
 }
 
-static bool ex_handler_bpf(const struct exception_table_entry *x,
-			   struct pt_regs *regs)
+bool ex_handler_bpf(const struct exception_table_entry *x, struct pt_regs *regs)
 {
-	int regno;
-	u8 *insn;
-
 	regs->psw.addr = extable_fixup(x);
-	insn = (u8 *)__rewind_psw(regs->psw, regs->int_code >> 16);
-	regno = get_probe_mem_regno(insn);
-	if (WARN_ON_ONCE(regno < 0))
-		/* JIT bug - unexpected instruction. */
-		return false;
-	regs->gprs[regno] = 0;
+	regs->gprs[x->data] = 0;
 	return true;
 }
 
@@ -642,16 +618,17 @@ static int bpf_jit_probe_mem(struct bpf_jit *jit, struct bpf_prog *fp,
 			     int probe_prg, int nop_prg)
 {
 	struct exception_table_entry *ex;
+	int reg, prg;
 	s64 delta;
 	u8 *insn;
-	int prg;
 	int i;
 
 	if (!fp->aux->extable)
 		/* Do nothing during early JIT passes. */
 		return 0;
 	insn = jit->prg_buf + probe_prg;
-	if (WARN_ON_ONCE(get_probe_mem_regno(insn) < 0))
+	reg = get_probe_mem_regno(insn);
+	if (WARN_ON_ONCE(reg < 0))
 		/* JIT bug - unexpected probe instruction. */
 		return -1;
 	if (WARN_ON_ONCE(probe_prg + insn_length(*insn) != nop_prg))
@@ -678,7 +655,8 @@ static int bpf_jit_probe_mem(struct bpf_jit *jit, struct bpf_prog *fp,
 			/* JIT bug - landing pad and extable must be close. */
 			return -1;
 		ex->fixup = delta;
-		ex->handler = (u8 *)ex_handler_bpf - (u8 *)&ex->handler;
+		ex->type = EX_TYPE_BPF;
+		ex->data = reg;
 		jit->excnt++;
 	}
 	return 0;
@@ -1216,20 +1194,75 @@ static noinline int bpf_jit_insn(struct bpf_jit *jit, struct bpf_prog *fp,
 		jit->seen |= SEEN_MEM;
 		break;
 	/*
-	 * BPF_STX XADD (atomic_add)
+	 * BPF_ATOMIC
 	 */
-	case BPF_STX | BPF_XADD | BPF_W: /* *(u32 *)(dst + off) += src */
-		/* laal %w0,%src,off(%dst) */
-		EMIT6_DISP_LH(0xeb000000, 0x00fa, REG_W0, src_reg,
-			      dst_reg, off);
+	case BPF_STX | BPF_ATOMIC | BPF_DW:
+	case BPF_STX | BPF_ATOMIC | BPF_W:
+	{
+		bool is32 = BPF_SIZE(insn->code) == BPF_W;
+
+		switch (insn->imm) {
+/* {op32|op64} {%w0|%src},%src,off(%dst) */
+#define EMIT_ATOMIC(op32, op64) do {					\
+	EMIT6_DISP_LH(0xeb000000, is32 ? (op32) : (op64),		\
+		      (insn->imm & BPF_FETCH) ? src_reg : REG_W0,	\
+		      src_reg, dst_reg, off);				\
+	if (insn->imm & BPF_FETCH) {					\
+		/* bcr 14,0 - see atomic_fetch_{add,and,or,xor}() */	\
+		_EMIT2(0x07e0);						\
+		if (is32)                                               \
+			EMIT_ZERO(src_reg);				\
+	}								\
+} while (0)
+		case BPF_ADD:
+		case BPF_ADD | BPF_FETCH:
+			/* {laal|laalg} */
+			EMIT_ATOMIC(0x00fa, 0x00ea);
+			break;
+		case BPF_AND:
+		case BPF_AND | BPF_FETCH:
+			/* {lan|lang} */
+			EMIT_ATOMIC(0x00f4, 0x00e4);
+			break;
+		case BPF_OR:
+		case BPF_OR | BPF_FETCH:
+			/* {lao|laog} */
+			EMIT_ATOMIC(0x00f6, 0x00e6);
+			break;
+		case BPF_XOR:
+		case BPF_XOR | BPF_FETCH:
+			/* {lax|laxg} */
+			EMIT_ATOMIC(0x00f7, 0x00e7);
+			break;
+#undef EMIT_ATOMIC
+		case BPF_XCHG:
+			/* {ly|lg} %w0,off(%dst) */
+			EMIT6_DISP_LH(0xe3000000,
+				      is32 ? 0x0058 : 0x0004, REG_W0, REG_0,
+				      dst_reg, off);
+			/* 0: {csy|csg} %w0,%src,off(%dst) */
+			EMIT6_DISP_LH(0xeb000000, is32 ? 0x0014 : 0x0030,
+				      REG_W0, src_reg, dst_reg, off);
+			/* brc 4,0b */
+			EMIT4_PCREL_RIC(0xa7040000, 4, jit->prg - 6);
+			/* {llgfr|lgr} %src,%w0 */
+			EMIT4(is32 ? 0xb9160000 : 0xb9040000, src_reg, REG_W0);
+			if (is32 && insn_is_zext(&insn[1]))
+				insn_count = 2;
+			break;
+		case BPF_CMPXCHG:
+			/* 0: {csy|csg} %b0,%src,off(%dst) */
+			EMIT6_DISP_LH(0xeb000000, is32 ? 0x0014 : 0x0030,
+				      BPF_REG_0, src_reg, dst_reg, off);
+			break;
+		default:
+			pr_err("Unknown atomic operation %02x\n", insn->imm);
+			return -1;
+		}
+
 		jit->seen |= SEEN_MEM;
 		break;
-	case BPF_STX | BPF_XADD | BPF_DW: /* *(u64 *)(dst + off) += src */
-		/* laalg %w0,%src,off(%dst) */
-		EMIT6_DISP_LH(0xeb000000, 0x00ea, REG_W0, src_reg,
-			      dst_reg, off);
-		jit->seen |= SEEN_MEM;
-		break;
+	}
 	/*
 	 * BPF_LDX
 	 */
@@ -1281,7 +1314,7 @@ static noinline int bpf_jit_insn(struct bpf_jit *jit, struct bpf_prog *fp,
 		jit->seen |= SEEN_FUNC;
 		/* lgrl %w1,func */
 		EMIT6_PCREL_RILB(0xc4080000, REG_W1, _EMIT_CONST_U64(func));
-		if (__is_defined(CC_USING_EXPOLINE) && !nospec_disable) {
+		if (nospec_uses_trampoline()) {
 			/* brasl %r14,__s390_indirect_jump_r1 */
 			EMIT6_PCREL_RILB(0xc0050000, REG_14, jit->r1_thunk_ip);
 		} else {
@@ -1318,7 +1351,7 @@ static noinline int bpf_jit_insn(struct bpf_jit *jit, struct bpf_prog *fp,
 				 jit->prg);
 
 		/*
-		 * if (tail_call_cnt++ > MAX_TAIL_CALL_CNT)
+		 * if (tail_call_cnt++ >= MAX_TAIL_CALL_CNT)
 		 *         goto out;
 		 */
 
@@ -1330,9 +1363,9 @@ static noinline int bpf_jit_insn(struct bpf_jit *jit, struct bpf_prog *fp,
 		EMIT4_IMM(0xa7080000, REG_W0, 1);
 		/* laal %w1,%w0,off(%r15) */
 		EMIT6_DISP_LH(0xeb000000, 0x00fa, REG_W1, REG_W0, REG_15, off);
-		/* clij %w1,MAX_TAIL_CALL_CNT,0x2,out */
+		/* clij %w1,MAX_TAIL_CALL_CNT-1,0x2,out */
 		patch_2_clij = jit->prg;
-		EMIT6_PCREL_RIEC(0xec000000, 0x007f, REG_W1, MAX_TAIL_CALL_CNT,
+		EMIT6_PCREL_RIEC(0xec000000, 0x007f, REG_W1, MAX_TAIL_CALL_CNT - 1,
 				 2, jit->prg);
 
 		/*
@@ -1364,8 +1397,16 @@ static noinline int bpf_jit_insn(struct bpf_jit *jit, struct bpf_prog *fp,
 		/* lg %r1,bpf_func(%r1) */
 		EMIT6_DISP_LH(0xe3000000, 0x0004, REG_1, REG_1, REG_0,
 			      offsetof(struct bpf_prog, bpf_func));
-		/* bc 0xf,tail_call_start(%r1) */
-		_EMIT4(0x47f01000 + jit->tail_call_start);
+		if (nospec_uses_trampoline()) {
+			jit->seen |= SEEN_FUNC;
+			/* aghi %r1,tail_call_start */
+			EMIT4_IMM(0xa70b0000, REG_1, jit->tail_call_start);
+			/* brcl 0xf,__s390_indirect_jump_r1 */
+			EMIT6_PCREL_RILC(0xc0040000, 0xf, jit->r1_thunk_ip);
+		} else {
+			/* bc 0xf,tail_call_start(%r1) */
+			_EMIT4(0x47f01000 + jit->tail_call_start);
+		}
 		/* out: */
 		if (jit->prg_buf) {
 			*(u16 *)(jit->prg_buf + patch_1_clrj + 2) =
@@ -1780,7 +1821,7 @@ struct bpf_prog *bpf_int_jit_compile(struct bpf_prog *fp)
 	/*
 	 * Three initial passes:
 	 *   - 1/2: Determine clobbered registers
-	 *   - 3:   Calculate program size and addrs arrray
+	 *   - 3:   Calculate program size and addrs array
 	 */
 	for (pass = 1; pass <= 3; pass++) {
 		if (bpf_jit_prog(&jit, fp, extra_pass, stack_depth)) {

@@ -56,10 +56,9 @@ static struct page_pinner_buffer pp_buffer;
 
 static bool page_pinner_enabled;
 DEFINE_STATIC_KEY_FALSE(page_pinner_inited);
-EXPORT_SYMBOL(page_pinner_inited);
+EXPORT_SYMBOL_GPL(page_pinner_inited);
 
 DEFINE_STATIC_KEY_TRUE(failure_tracking);
-EXPORT_SYMBOL_GPL(failure_tracking);
 
 static depot_stack_handle_t failure_handle;
 
@@ -88,6 +87,16 @@ static void init_page_pinner(void)
 {
 	if (!page_pinner_enabled)
 		return;
+
+	pp_buffer.buffer = kvmalloc_array(pp_buf_size, sizeof(*pp_buffer.buffer),
+				GFP_KERNEL);
+	if (!pp_buffer.buffer) {
+		pr_info("page_pinner disabled due to failure of buffer allocation\n");
+		return;
+	}
+
+	spin_lock_init(&pp_buffer.lock);
+	pp_buffer.index = 0;
 
 	register_failure_stack();
 	static_branch_enable(&page_pinner_inited);
@@ -151,7 +160,7 @@ void __free_page_pinner(struct page *page, unsigned int order)
 	if (!pp_buffer.buffer)
 		return;
 
-	page_ext = lookup_page_ext(page);
+	page_ext = page_ext_get(page);
 	if (unlikely(!page_ext))
 		return;
 
@@ -162,10 +171,6 @@ void __free_page_pinner(struct page *page, unsigned int order)
 			continue;
 
 		page_pinner = get_page_pinner(page_ext);
-		/* record page free call path */
-		page_ext = lookup_page_ext(page);
-		if (unlikely(!page_ext))
-			continue;
 
 		record.handle = save_stack(GFP_NOWAIT|__GFP_NOWARN);
 		record.ts_usec = (u64)ktime_to_us(ktime_get_boottime());
@@ -179,6 +184,7 @@ void __free_page_pinner(struct page *page, unsigned int order)
 		clear_bit(PAGE_EXT_PINNER_MIGRATION_FAILED, &page_ext->flags);
 		page_ext = page_ext_next(page_ext);
 	}
+	page_ext_put(page_ext);
 }
 
 static ssize_t
@@ -246,16 +252,22 @@ err:
 
 void __page_pinner_failure_detect(struct page *page)
 {
-	struct page_ext *page_ext = lookup_page_ext(page);
+	struct page_ext *page_ext;
 	struct page_pinner *page_pinner;
 	struct captured_pinner record;
 	u64 now;
 
+	if (!static_branch_unlikely(&failure_tracking))
+		return;
+
+	page_ext = page_ext_get(page);
 	if (unlikely(!page_ext))
 		return;
 
-	if (test_bit(PAGE_EXT_PINNER_MIGRATION_FAILED, &page_ext->flags))
+	if (test_bit(PAGE_EXT_PINNER_MIGRATION_FAILED, &page_ext->flags)) {
+		page_ext_put(page_ext);
 		return;
+	}
 
 	now = (u64)ktime_to_us(ktime_get_boottime());
 	page_pinner = get_page_pinner(page_ext);
@@ -268,21 +280,28 @@ void __page_pinner_failure_detect(struct page *page)
 	capture_page_state(page, &record);
 
 	add_record(&pp_buffer, &record);
+	page_ext_put(page_ext);
 }
 EXPORT_SYMBOL_GPL(__page_pinner_failure_detect);
 
 void __page_pinner_put_page(struct page *page)
 {
-	struct page_ext *page_ext = lookup_page_ext(page);
+	struct page_ext *page_ext;
 	struct page_pinner *page_pinner;
 	struct captured_pinner record;
 	u64 now, ts_usec;
 
+	if (!static_branch_unlikely(&failure_tracking))
+		return;
+
+	page_ext = page_ext_get(page);
 	if (unlikely(!page_ext))
 		return;
 
-	if (!test_bit(PAGE_EXT_PINNER_MIGRATION_FAILED, &page_ext->flags))
+	if (!test_bit(PAGE_EXT_PINNER_MIGRATION_FAILED, &page_ext->flags)) {
+		page_ext_put(page_ext);
 		return;
+	}
 
 	page_pinner = get_page_pinner(page_ext);
 	record.handle = save_stack(GFP_NOWAIT|__GFP_NOWARN);
@@ -297,6 +316,7 @@ void __page_pinner_put_page(struct page *page)
 	capture_page_state(page, &record);
 
 	add_record(&pp_buffer, &record);
+	page_ext_put(page_ext);
 }
 EXPORT_SYMBOL_GPL(__page_pinner_put_page);
 
@@ -393,16 +413,6 @@ static int __init page_pinner_init(void)
 
 	if (!static_branch_unlikely(&page_pinner_inited))
 		return 0;
-
-	pp_buffer.buffer = kvmalloc_array(pp_buf_size, sizeof(*pp_buffer.buffer),
-				GFP_KERNEL);
-	if (!pp_buffer.buffer) {
-		pr_info("page_pinner disabled due to \n");
-		return 1;
-	}
-
-	spin_lock_init(&pp_buffer.lock);
-	pp_buffer.index = 0;
 
 	pr_info("page_pinner enabled\n");
 

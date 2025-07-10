@@ -325,18 +325,9 @@ static irqreturn_t axi_fan_control_irq_handler(int irq, void *data)
 	u32 irq_pending = axi_ioread(ADI_REG_IRQ_PENDING, ctl);
 	u32 clear_mask;
 
-	if (irq_pending & ADI_IRQ_SRC_NEW_MEASUR) {
-		if (ctl->update_tacho_params) {
-			u32 new_tach = axi_ioread(ADI_REG_TACH_MEASUR, ctl);
-
-			/* get 25% tolerance */
-			u32 tach_tol = DIV_ROUND_CLOSEST(new_tach * 25, 100);
-			/* set new tacho parameters */
-			axi_iowrite(new_tach, ADI_REG_TACH_PERIOD, ctl);
-			axi_iowrite(tach_tol, ADI_REG_TACH_TOLERANCE, ctl);
-			ctl->update_tacho_params = false;
-		}
-	}
+	if (irq_pending & ADI_IRQ_SRC_TEMP_INCREASE)
+		/* hardware requested a new pwm */
+		ctl->hw_pwm_req = true;
 
 	if (irq_pending & ADI_IRQ_SRC_PWM_CHANGED) {
 		/*
@@ -348,13 +339,23 @@ static irqreturn_t axi_fan_control_irq_handler(int irq, void *data)
 			ctl->update_tacho_params = true;
 		} else {
 			ctl->hw_pwm_req = false;
-			sysfs_notify(&ctl->hdev->kobj, NULL, "pwm1");
+			hwmon_notify_event(ctl->hdev, hwmon_pwm,
+					   hwmon_pwm_input, 0);
 		}
 	}
 
-	if (irq_pending & ADI_IRQ_SRC_TEMP_INCREASE)
-		/* hardware requested a new pwm */
-		ctl->hw_pwm_req = true;
+	if (irq_pending & ADI_IRQ_SRC_NEW_MEASUR) {
+		if (ctl->update_tacho_params) {
+			u32 new_tach = axi_ioread(ADI_REG_TACH_MEASUR, ctl);
+			/* get 25% tolerance */
+			u32 tach_tol = DIV_ROUND_CLOSEST(new_tach * 25, 100);
+
+			/* set new tacho parameters */
+			axi_iowrite(new_tach, ADI_REG_TACH_PERIOD, ctl);
+			axi_iowrite(tach_tol, ADI_REG_TACH_TOLERANCE, ctl);
+			ctl->update_tacho_params = false;
+		}
+	}
 
 	if (irq_pending & ADI_IRQ_SRC_TACH_ERR)
 		ctl->fan_fault = 1;
@@ -472,7 +473,7 @@ static int axi_fan_control_probe(struct platform_device *pdev)
 	if (IS_ERR(ctl->base))
 		return PTR_ERR(ctl->base);
 
-	clk = devm_clk_get(&pdev->dev, NULL);
+	clk = devm_clk_get_enabled(&pdev->dev, NULL);
 	if (IS_ERR(clk)) {
 		dev_err(&pdev->dev, "clk_get failed with %ld\n", PTR_ERR(clk));
 		return PTR_ERR(clk);

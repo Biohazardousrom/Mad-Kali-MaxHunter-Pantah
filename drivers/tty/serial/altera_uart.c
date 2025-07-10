@@ -175,7 +175,7 @@ static void altera_uart_break_ctl(struct uart_port *port, int break_state)
 
 static void altera_uart_set_termios(struct uart_port *port,
 				    struct ktermios *termios,
-				    struct ktermios *old)
+				    const struct ktermios *old)
 {
 	unsigned long flags;
 	unsigned int baud, baudclk;
@@ -242,9 +242,7 @@ static void altera_uart_rx_chars(struct uart_port *port)
 				 flag);
 	}
 
-	spin_unlock(&port->lock);
 	tty_flip_buffer_push(&port->state->port);
-	spin_lock(&port->lock);
 }
 
 static void altera_uart_tx_chars(struct uart_port *port)
@@ -437,7 +435,7 @@ static struct altera_uart altera_uart_ports[CONFIG_SERIAL_ALTERA_UART_MAXPORTS];
 
 #if defined(CONFIG_SERIAL_ALTERA_UART_CONSOLE)
 
-static void altera_uart_console_putc(struct uart_port *port, int c)
+static void altera_uart_console_putc(struct uart_port *port, unsigned char c)
 {
 	while (!(altera_uart_readl(port, ALTERA_UART_STATUS_REG) &
 		 ALTERA_UART_STATUS_TRDY_MSK))
@@ -552,7 +550,6 @@ static int altera_uart_probe(struct platform_device *pdev)
 	struct altera_uart_platform_uart *platp = dev_get_platdata(&pdev->dev);
 	struct uart_port *port;
 	struct resource *res_mem;
-	struct resource *res_irq;
 	int i = pdev->id;
 	int ret;
 
@@ -576,9 +573,11 @@ static int altera_uart_probe(struct platform_device *pdev)
 	else
 		return -EINVAL;
 
-	res_irq = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
-	if (res_irq)
-		port->irq = res_irq->start;
+	ret = platform_get_irq_optional(pdev, 0);
+	if (ret < 0 && ret != -ENXIO)
+		return ret;
+	if (ret > 0)
+		port->irq = ret;
 	else if (platp)
 		port->irq = platp->irq;
 

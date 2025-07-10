@@ -37,6 +37,8 @@ static bool is_supervision_frame(struct hsr_priv *hsr, struct sk_buff *skb)
 	struct ethhdr *eth_hdr;
 	struct hsr_sup_tag *hsr_sup_tag;
 	struct hsrv1_ethhdr_sp *hsr_V1_hdr;
+	struct hsr_sup_tlv *hsr_sup_tlv;
+	u16 total_length = 0;
 
 	WARN_ON_ONCE(!skb_mac_header_was_set(skb));
 	eth_hdr = (struct ethhdr *)skb_mac_header(skb);
@@ -53,23 +55,63 @@ static bool is_supervision_frame(struct hsr_priv *hsr, struct sk_buff *skb)
 
 	/* Get the supervision header from correct location. */
 	if (eth_hdr->h_proto == htons(ETH_P_HSR)) { /* Okay HSRv1. */
+		total_length = sizeof(struct hsrv1_ethhdr_sp);
+		if (!pskb_may_pull(skb, total_length))
+			return false;
+
 		hsr_V1_hdr = (struct hsrv1_ethhdr_sp *)skb_mac_header(skb);
 		if (hsr_V1_hdr->hsr.encap_proto != htons(ETH_P_PRP))
 			return false;
 
 		hsr_sup_tag = &hsr_V1_hdr->hsr_sup;
 	} else {
+		total_length = sizeof(struct hsrv0_ethhdr_sp);
+		if (!pskb_may_pull(skb, total_length))
+			return false;
+
 		hsr_sup_tag =
 		     &((struct hsrv0_ethhdr_sp *)skb_mac_header(skb))->hsr_sup;
 	}
 
-	if (hsr_sup_tag->HSR_TLV_type != HSR_TLV_ANNOUNCE &&
-	    hsr_sup_tag->HSR_TLV_type != HSR_TLV_LIFE_CHECK &&
-	    hsr_sup_tag->HSR_TLV_type != PRP_TLV_LIFE_CHECK_DD &&
-	    hsr_sup_tag->HSR_TLV_type != PRP_TLV_LIFE_CHECK_DA)
+	if (hsr_sup_tag->tlv.HSR_TLV_type != HSR_TLV_ANNOUNCE &&
+	    hsr_sup_tag->tlv.HSR_TLV_type != HSR_TLV_LIFE_CHECK &&
+	    hsr_sup_tag->tlv.HSR_TLV_type != PRP_TLV_LIFE_CHECK_DD &&
+	    hsr_sup_tag->tlv.HSR_TLV_type != PRP_TLV_LIFE_CHECK_DA)
 		return false;
-	if (hsr_sup_tag->HSR_TLV_length != 12 &&
-	    hsr_sup_tag->HSR_TLV_length != sizeof(struct hsr_sup_payload))
+	if (hsr_sup_tag->tlv.HSR_TLV_length != 12 &&
+	    hsr_sup_tag->tlv.HSR_TLV_length != sizeof(struct hsr_sup_payload))
+		return false;
+
+	/* Get next tlv */
+	total_length += hsr_sup_tag->tlv.HSR_TLV_length;
+	if (!pskb_may_pull(skb, total_length))
+		return false;
+	skb_pull(skb, total_length);
+	hsr_sup_tlv = (struct hsr_sup_tlv *)skb->data;
+	skb_push(skb, total_length);
+
+	/* if this is a redbox supervision frame we need to verify
+	 * that more data is available
+	 */
+	if (hsr_sup_tlv->HSR_TLV_type == PRP_TLV_REDBOX_MAC) {
+		/* tlv length must be a length of a mac address */
+		if (hsr_sup_tlv->HSR_TLV_length != sizeof(struct hsr_sup_payload))
+			return false;
+
+		/* make sure another tlv follows */
+		total_length += sizeof(struct hsr_sup_tlv) + hsr_sup_tlv->HSR_TLV_length;
+		if (!pskb_may_pull(skb, total_length))
+			return false;
+
+		/* get next tlv */
+		skb_pull(skb, total_length);
+		hsr_sup_tlv = (struct hsr_sup_tlv *)skb->data;
+		skb_push(skb, total_length);
+	}
+
+	/* end of tlvs must follow at the end */
+	if (hsr_sup_tlv->HSR_TLV_type == HSR_TLV_EOT &&
+	    hsr_sup_tlv->HSR_TLV_length != 0)
 		return false;
 
 	return true;
@@ -249,6 +291,8 @@ struct sk_buff *hsr_create_tagged_frame(struct hsr_frame_info *frame,
 		/* set the lane id properly */
 		hsr_set_path_id(hsr_ethhdr, port);
 		return skb_clone(frame->skb_hsr, GFP_ATOMIC);
+	} else if (port->dev->features & NETIF_F_HW_HSR_TAG_INS) {
+		return skb_clone(frame->skb_std, GFP_ATOMIC);
 	}
 
 	/* Create the new skb with enough headroom to fit the HSR tag */
@@ -291,6 +335,8 @@ struct sk_buff *prp_create_tagged_frame(struct hsr_frame_info *frame,
 			return NULL;
 		}
 		return skb_clone(frame->skb_prp, GFP_ATOMIC);
+	} else if (port->dev->features & NETIF_F_HW_HSR_TAG_INS) {
+		return skb_clone(frame->skb_std, GFP_ATOMIC);
 	}
 
 	skb = skb_copy_expand(frame->skb_std, 0,
@@ -342,6 +388,14 @@ bool prp_drop_frame(struct hsr_frame_info *frame, struct hsr_port *port)
 		 port->type ==  HSR_PT_SLAVE_A));
 }
 
+bool hsr_drop_frame(struct hsr_frame_info *frame, struct hsr_port *port)
+{
+	if (port->dev->features & NETIF_F_HW_HSR_FWD)
+		return prp_drop_frame(frame, port);
+
+	return false;
+}
+
 /* Forward the frame through all devices except:
  * - Back through the receiving device
  * - If it's a HSR frame: through a device where it has passed before
@@ -358,6 +412,7 @@ static void hsr_forward_do(struct hsr_frame_info *frame)
 {
 	struct hsr_port *port;
 	struct sk_buff *skb;
+	bool sent = false;
 
 	hsr_for_each_port(frame->port_rcv->hsr, port) {
 		struct hsr_priv *hsr = port->hsr;
@@ -371,6 +426,12 @@ static void hsr_forward_do(struct hsr_frame_info *frame)
 
 		/* Deliver frames directly addressed to us to master only */
 		if (port->type != HSR_PT_MASTER && frame->is_local_exclusive)
+			continue;
+
+		/* If hardware duplicate generation is enabled, only send out
+		 * one port.
+		 */
+		if ((port->dev->features & NETIF_F_HW_HSR_DUP) && sent)
 			continue;
 
 		/* Don't send frame over port where it has been sent before.
@@ -404,10 +465,12 @@ static void hsr_forward_do(struct hsr_frame_info *frame)
 		}
 
 		skb->dev = port->dev;
-		if (port->type == HSR_PT_MASTER)
+		if (port->type == HSR_PT_MASTER) {
 			hsr_deliver_master(skb, port->dev, frame->node_src);
-		else
-			hsr_xmit(skb, port, frame);
+		} else {
+			if (!hsr_xmit(skb, port, frame))
+				sent = true;
+		}
 	}
 }
 

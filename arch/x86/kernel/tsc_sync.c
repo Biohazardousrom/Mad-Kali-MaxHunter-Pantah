@@ -192,11 +192,9 @@ bool tsc_store_and_check_tsc_adjust(bool bootcpu)
 	cur->warned = false;
 
 	/*
-	 * If a non-zero TSC value for socket 0 may be valid then the default
-	 * adjusted value cannot assumed to be zero either.
+	 * The default adjust value cannot be assumed to be zero on any socket.
 	 */
-	if (tsc_async_resets)
-		cur->adjusted = bootval;
+	cur->adjusted = bootval;
 
 	/*
 	 * Check whether this CPU is the first in a package to come up. In
@@ -513,7 +511,7 @@ retry:
 	/*
 	 * Add the result to the previous adjustment value.
 	 *
-	 * The adjustement value is slightly off by the overhead of the
+	 * The adjustment value is slightly off by the overhead of the
 	 * sync mechanism (observed values are ~200 TSC cycles), but this
 	 * really depends on CPU, node distance and frequency. So
 	 * compensating for this is hard to get right. Experiments show

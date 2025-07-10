@@ -88,6 +88,12 @@ enum key_need_perm {
 	KEY_DEFER_PERM_CHECK,	/* Special: permission check is deferred */
 };
 
+enum key_lookup_flag {
+	KEY_LOOKUP_CREATE = 0x01,
+	KEY_LOOKUP_PARTIAL = 0x02,
+	KEY_LOOKUP_ALL = (KEY_LOOKUP_CREATE | KEY_LOOKUP_PARTIAL),
+};
+
 struct seq_file;
 struct user_struct;
 struct signal_struct;
@@ -361,7 +367,7 @@ static inline struct key *request_key(struct key_type *type,
  * completion of keys undergoing construction with a non-interruptible wait.
  */
 #define request_key_net(type, description, net, callout_info) \
-	request_key_tag(type, description, net->key_domain, callout_info);
+	request_key_tag(type, description, net->key_domain, callout_info)
 
 /**
  * request_key_net_rcu - Request a key for a net namespace under RCU conditions
@@ -373,7 +379,7 @@ static inline struct key *request_key(struct key_type *type,
  * network namespace are used.
  */
 #define request_key_net_rcu(type, description, net) \
-	request_key_rcu(type, description, net->key_domain);
+	request_key_rcu(type, description, net->key_domain)
 #endif /* CONFIG_NET */
 
 extern int wait_for_key_construction(struct key *key, bool intr);

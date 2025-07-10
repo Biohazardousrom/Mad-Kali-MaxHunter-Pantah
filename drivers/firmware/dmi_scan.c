@@ -102,6 +102,17 @@ static void dmi_decode_table(u8 *buf,
 		const struct dmi_header *dm = (const struct dmi_header *)data;
 
 		/*
+		 * If a short entry is found (less than 4 bytes), not only it
+		 * is invalid, but we cannot reliably locate the next entry.
+		 */
+		if (dm->length < sizeof(struct dmi_header)) {
+			pr_warn(FW_BUG
+				"Corrupted DMI table, offset %zd (only %d entries processed)\n",
+				data - buf, i);
+			break;
+		}
+
+		/*
 		 *  We want to know the total length (formatted area and
 		 *  strings) before decoding to make sure we won't run off the
 		 *  table in dmi_decode or dmi_string
@@ -166,6 +177,7 @@ static int __init dmi_checksum(const u8 *buf, u8 len)
 static const char *dmi_ident[DMI_STRING_MAX];
 static LIST_HEAD(dmi_devices);
 int dmi_available;
+EXPORT_SYMBOL_GPL(dmi_available);
 
 /*
  *	Save a DMI string
@@ -566,8 +578,13 @@ static int __init dmi_present(const u8 *buf)
 {
 	u32 smbios_ver;
 
+	/*
+	 * The size of this structure is 31 bytes, but we also accept value
+	 * 30 due to a mistake in SMBIOS specification version 2.1.
+	 */
 	if (memcmp(buf, "_SM_", 4) == 0 &&
-	    buf[5] < 32 && dmi_checksum(buf, buf[5])) {
+	    buf[5] >= 30 && buf[5] <= 32 &&
+	    dmi_checksum(buf, buf[5])) {
 		smbios_ver = get_unaligned_be16(buf + 6);
 		smbios_entry_point_size = buf[5];
 		memcpy(smbios_entry_point, buf, smbios_entry_point_size);
@@ -628,8 +645,9 @@ static int __init dmi_present(const u8 *buf)
 static int __init dmi_smbios3_present(const u8 *buf)
 {
 	if (memcmp(buf, "_SM3_", 5) == 0 &&
-	    buf[6] < 32 && dmi_checksum(buf, buf[6])) {
-		dmi_ver = get_unaligned_be32(buf + 6) & 0xFFFFFF;
+	    buf[6] >= 24 && buf[6] <= 32 &&
+	    dmi_checksum(buf, buf[6])) {
+		dmi_ver = get_unaligned_be24(buf + 7);
 		dmi_num = 0;			/* No longer specified */
 		dmi_len = get_unaligned_le32(buf + 12);
 		dmi_base = get_unaligned_le64(buf + 16);

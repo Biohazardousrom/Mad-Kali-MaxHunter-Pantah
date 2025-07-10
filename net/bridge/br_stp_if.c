@@ -201,9 +201,6 @@ int br_stp_set_enabled(struct net_bridge *br, unsigned long val,
 {
 	ASSERT_RTNL();
 
-	if (!net_eq(dev_net(br->dev), &init_net))
-		NL_SET_ERR_MSG_MOD(extack, "STP does not work in non-root netns");
-
 	if (br_mrp_enabled(br)) {
 		NL_SET_ERR_MSG_MOD(extack,
 				   "STP can't be enabled if MRP is already enabled");
@@ -236,7 +233,7 @@ void br_stp_change_bridge_id(struct net_bridge *br, const unsigned char *addr)
 
 	memcpy(oldaddr, br->bridge_id.addr, ETH_ALEN);
 	memcpy(br->bridge_id.addr, addr, ETH_ALEN);
-	memcpy(br->dev->dev_addr, addr, ETH_ALEN);
+	eth_hw_addr_set(br->dev, addr);
 
 	list_for_each_entry(p, &br->port_list, list) {
 		if (ether_addr_equal(p->designated_bridge.addr, oldaddr))

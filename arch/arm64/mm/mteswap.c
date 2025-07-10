@@ -12,7 +12,7 @@ static DEFINE_XARRAY(mte_pages);
 void *mte_allocate_tag_storage(void)
 {
 	/* tags granule is 16 bytes, 2 tags stored per byte */
-	return kmalloc(PAGE_SIZE / 16 / 2, GFP_KERNEL);
+	return kmalloc(MTE_PAGE_TAG_STORAGE, GFP_KERNEL);
 }
 
 void mte_free_tag_storage(char *storage)
@@ -24,7 +24,7 @@ int mte_save_tags(struct page *page)
 {
 	void *tag_storage, *ret;
 
-	if (!test_bit(PG_mte_tagged, &page->flags))
+	if (!page_mte_tagged(page))
 		return 0;
 
 	tag_storage = mte_allocate_tag_storage();
@@ -46,25 +46,19 @@ int mte_save_tags(struct page *page)
 	return 0;
 }
 
-bool mte_restore_tags(swp_entry_t entry, struct page *page)
+void mte_restore_tags(swp_entry_t entry, struct page *page)
 {
 	void *tags = xa_load(&mte_pages, entry.val);
 
 	if (!tags)
-		return false;
+		return;
 
-	page_kasan_tag_reset(page);
 	/*
-	 * We need smp_wmb() in between setting the flags and clearing the
-	 * tags because if another thread reads page->flags and builds a
-	 * tagged address out of it, there is an actual dependency to the
-	 * memory access, but on the current thread we do not guarantee that
-	 * the new page->flags are visible before the tags were updated.
+	 * Test PG_mte_tagged in case the tags were restored before
+	 * (e.g. CoW pages).
 	 */
-	smp_wmb();
-	mte_restore_page_tags(page_address(page), tags);
-
-	return true;
+	if (!test_and_set_bit(PG_mte_tagged, &page->flags))
+		mte_restore_page_tags(page_address(page), tags);
 }
 
 void mte_invalidate_tags(int type, pgoff_t offset)

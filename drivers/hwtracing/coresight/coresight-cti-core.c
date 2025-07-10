@@ -151,8 +151,15 @@ static int cti_disable_hw(struct cti_drvdata *drvdata)
 {
 	struct cti_config *config = &drvdata->config;
 	struct coresight_device *csdev = drvdata->csdev;
+	int ret = 0;
 
 	spin_lock(&drvdata->spinlock);
+
+	/* don't allow negative refcounts, return an error */
+	if (!atomic_read(&drvdata->config.enable_req_count)) {
+		ret = -EINVAL;
+		goto cti_not_disabled;
+	}
 
 	/* check refcount - disable on 0 */
 	if (atomic_dec_return(&drvdata->config.enable_req_count) > 0)
@@ -171,12 +178,12 @@ static int cti_disable_hw(struct cti_drvdata *drvdata)
 	coresight_disclaim_device_unlocked(csdev);
 	CS_LOCK(drvdata->base);
 	spin_unlock(&drvdata->spinlock);
-	return 0;
+	return ret;
 
 	/* not disabled this call */
 cti_not_disabled:
 	spin_unlock(&drvdata->spinlock);
-	return 0;
+	return ret;
 }
 
 void cti_write_single_reg(struct cti_drvdata *drvdata, int offset, u32 value)
@@ -536,7 +543,7 @@ cti_match_fixup_csdev(struct cti_device *ctidev, const char *node_name,
 /*
  * Search the cti list to add an associated CTI into the supplied CS device
  * This will set the association if CTI declared before the CS device.
- * (called from coresight_register() with coresight_mutex locked).
+ * (called from coresight_register() without coresight_mutex locked).
  */
 static void cti_add_assoc_to_csdev(struct coresight_device *csdev)
 {
@@ -564,7 +571,8 @@ static void cti_add_assoc_to_csdev(struct coresight_device *csdev)
 			 * if we found a matching csdev then update the ECT
 			 * association pointer for the device with this CTI.
 			 */
-			csdev->ect_dev = ect_item->csdev;
+			coresight_set_assoc_ectdev_mutex(csdev,
+							 ect_item->csdev);
 			break;
 		}
 	}

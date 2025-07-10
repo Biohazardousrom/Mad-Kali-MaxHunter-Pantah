@@ -4,11 +4,17 @@
 #include <linux/page_reporting.h>
 #include <linux/gfp.h>
 #include <linux/export.h>
+#include <linux/module.h>
 #include <linux/delay.h>
 #include <linux/scatterlist.h>
+#include <linux/mem_relinquish.h>
 
 #include "page_reporting.h"
 #include "internal.h"
+
+unsigned int page_reporting_order = MAX_ORDER;
+module_param(page_reporting_order, uint, 0644);
+MODULE_PARM_DESC(page_reporting_order, "Set page reporting order");
 
 #define PAGE_REPORTING_DELAY	(2 * HZ)
 static struct page_reporting_dev_info __rcu *pr_dev_info __read_mostly;
@@ -31,8 +37,8 @@ __page_reporting_request(struct page_reporting_dev_info *prdev)
 		return;
 
 	/*
-	 *  If reporting is already active there is nothing we need to do.
-	 *  Test against 0 as that represents PAGE_REPORTING_IDLE.
+	 * If reporting is already active there is nothing we need to do.
+	 * Test against 0 as that represents PAGE_REPORTING_IDLE.
 	 */
 	state = atomic_xchg(&prdev->state, PAGE_REPORTING_REQUESTED);
 	if (state != PAGE_REPORTING_IDLE)
@@ -43,7 +49,7 @@ __page_reporting_request(struct page_reporting_dev_info *prdev)
 	 * now we are limiting this to running no more than once every
 	 * couple of seconds.
 	 */
-	queue_delayed_work(system_power_efficient_wq, &prdev->work, PAGE_REPORTING_DELAY);
+	schedule_delayed_work(&prdev->work, PAGE_REPORTING_DELAY);
 }
 
 /* notify prdev of free page reporting request */
@@ -115,7 +121,7 @@ page_reporting_cycle(struct page_reporting_dev_info *prdev, struct zone *zone,
 	unsigned int page_len = PAGE_SIZE << order;
 	struct page *page, *next;
 	long budget;
-	int err = 0;
+	int i, err = 0;
 
 	/*
 	 * Perform early check, if free area is empty there is
@@ -170,6 +176,10 @@ page_reporting_cycle(struct page_reporting_dev_info *prdev, struct zone *zone,
 			--(*offset);
 			sg_set_page(&sgl[*offset], page, page_len, 0);
 
+			/* Notify hyp that these pages are reclaimable. */
+			for (i = 0; i < (1<<order); i++)
+				page_relinquish(page+i);
+
 			continue;
 		}
 
@@ -211,7 +221,7 @@ page_reporting_cycle(struct page_reporting_dev_info *prdev, struct zone *zone,
 	}
 
 	/* Rotate any leftover pages to the head of the freelist */
-	if (&next->lru != list && !list_is_first(&next->lru, list))
+	if (!list_entry_is_head(next, list, lru) && !list_is_first(&next->lru, list))
 		list_rotate_to_front(&next->lru, list);
 
 	spin_unlock_irq(&zone->lock);
@@ -229,7 +239,7 @@ page_reporting_process_zone(struct page_reporting_dev_info *prdev,
 
 	/* Generate minimum watermark to be able to guarantee progress */
 	watermark = low_wmark_pages(zone) +
-		    (PAGE_REPORTING_CAPACITY << PAGE_REPORTING_MIN_ORDER);
+		    (PAGE_REPORTING_CAPACITY << page_reporting_order);
 
 	/*
 	 * Cancel request if insufficient free memory or if we failed
@@ -239,7 +249,7 @@ page_reporting_process_zone(struct page_reporting_dev_info *prdev,
 		return err;
 
 	/* Process each free list starting from lowest order/mt */
-	for (order = PAGE_REPORTING_MIN_ORDER; order < MAX_ORDER; order++) {
+	for (order = page_reporting_order; order < MAX_ORDER; order++) {
 		for (mt = 0; mt < MIGRATE_TYPES; mt++) {
 			/* We do not pull pages from the isolate free list */
 			if (is_migrate_isolate(mt))
@@ -306,7 +316,7 @@ err_out:
 	 */
 	state = atomic_cmpxchg(&prdev->state, state, PAGE_REPORTING_IDLE);
 	if (state == PAGE_REPORTING_REQUESTED)
-		queue_delayed_work(system_power_efficient_wq, &prdev->work, PAGE_REPORTING_DELAY);
+		schedule_delayed_work(&prdev->work, PAGE_REPORTING_DELAY);
 }
 
 static DEFINE_MUTEX(page_reporting_mutex);
@@ -323,6 +333,12 @@ int page_reporting_register(struct page_reporting_dev_info *prdev)
 		err = -EBUSY;
 		goto err_out;
 	}
+
+	/*
+	 * Update the page reporting order if it's specified by driver.
+	 * Otherwise, it falls back to @pageblock_order.
+	 */
+	page_reporting_order = prdev->order ? : pageblock_order;
 
 	/* initialize state and work structures */
 	atomic_set(&prdev->state, PAGE_REPORTING_IDLE);

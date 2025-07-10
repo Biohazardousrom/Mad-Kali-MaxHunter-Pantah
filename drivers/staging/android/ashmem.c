@@ -179,6 +179,7 @@ static inline void lru_del(struct ashmem_range *range)
  * @purged:	   Initial purge status (ASMEM_NOT_PURGED or ASHMEM_WAS_PURGED)
  * @start:	   The starting page (inclusive)
  * @end:	   The ending page (inclusive)
+ * @new_range:	   The placeholder for the new range
  *
  * This function is protected by ashmem_mutex.
  */
@@ -400,7 +401,7 @@ static int ashmem_mmap(struct file *file, struct vm_area_struct *vma)
 		ret = -EPERM;
 		goto out;
 	}
-	vma->vm_flags &= ~calc_vm_may_flags(~asma->prot_mask);
+	vm_flags_clear(vma, calc_vm_may_flags(~asma->prot_mask));
 
 	if (!asma->file) {
 		char *name = ASHMEM_NAME_DEF;
@@ -450,9 +451,9 @@ static int ashmem_mmap(struct file *file, struct vm_area_struct *vma)
 		vma_set_anonymous(vma);
 	}
 
-	if (vma->vm_file)
-		fput(vma->vm_file);
-	vma->vm_file = asma->file;
+	vma_set_file(vma, asma->file);
+	/* XXX: merge this with the get_file() above if possible */
+	fput(asma->file);
 
 out:
 	mutex_unlock(&ashmem_mutex);
@@ -702,30 +703,33 @@ static int ashmem_pin(struct ashmem_area *asma, size_t pgstart, size_t pgend,
 static int ashmem_unpin(struct ashmem_area *asma, size_t pgstart, size_t pgend,
 			struct ashmem_range **new_range)
 {
-	struct ashmem_range *range, *next;
+	struct ashmem_range *range = NULL, *iter, *next;
 	unsigned int purged = ASHMEM_NOT_PURGED;
 
 restart:
-	list_for_each_entry_safe(range, next, &asma->unpinned_list, unpinned) {
+	list_for_each_entry_safe(iter, next, &asma->unpinned_list, unpinned) {
 		/* short circuit: this is our insertion point */
-		if (range_before_page(range, pgstart))
+		if (range_before_page(iter, pgstart)) {
+			range = iter;
 			break;
+		}
 
 		/*
 		 * The user can ask us to unpin pages that are already entirely
 		 * or partially pinned. We handle those two cases here.
 		 */
-		if (page_range_subsumed_by_range(range, pgstart, pgend))
+		if (page_range_subsumed_by_range(iter, pgstart, pgend))
 			return 0;
-		if (page_range_in_range(range, pgstart, pgend)) {
-			pgstart = min(range->pgstart, pgstart);
-			pgend = max(range->pgend, pgend);
-			purged |= range->purged;
-			range_del(range);
+		if (page_range_in_range(iter, pgstart, pgend)) {
+			pgstart = min(iter->pgstart, pgstart);
+			pgend = max(iter->pgend, pgend);
+			purged |= iter->purged;
+			range_del(iter);
 			goto restart;
 		}
 	}
 
+	range = list_prepare_entry(range, &asma->unpinned_list, unpinned);
 	range_alloc(asma, range, purged, pgstart, pgend, new_range);
 	return 0;
 }
@@ -962,7 +966,7 @@ static int __init ashmem_init(void)
 
 	ashmem_range_cachep = kmem_cache_create("ashmem_range_cache",
 						sizeof(struct ashmem_range),
-						0, 0, NULL);
+						0, SLAB_RECLAIM_ACCOUNT, NULL);
 	if (!ashmem_range_cachep) {
 		pr_err("failed to create slab cache\n");
 		goto out_free1;
@@ -974,7 +978,7 @@ static int __init ashmem_init(void)
 		goto out_free2;
 	}
 
-	ret = register_shrinker(&ashmem_shrinker);
+	ret = register_shrinker(&ashmem_shrinker, "android-ashmem");
 	if (ret) {
 		pr_err("failed to register shrinker!\n");
 		goto out_demisc;

@@ -574,14 +574,12 @@ free_md:
 	return r;
 }
 
-static int mipid_spi_remove(struct spi_device *spi)
+static void mipid_spi_remove(struct spi_device *spi)
 {
 	struct mipid_device *md = dev_get_drvdata(&spi->dev);
 
 	mipid_disable(&md->panel);
 	kfree(md);
-
-	return 0;
 }
 
 static struct spi_driver mipid_spi_driver = {

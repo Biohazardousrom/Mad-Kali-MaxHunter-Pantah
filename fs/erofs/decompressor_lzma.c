@@ -72,10 +72,10 @@ int z_erofs_lzma_init(void)
 }
 
 int z_erofs_load_lzma_config(struct super_block *sb,
-			     struct erofs_super_block *dsb,
-			     struct z_erofs_lzma_cfgs *lzma, int size)
+			struct erofs_super_block *dsb, void *data, int size)
 {
 	static DEFINE_MUTEX(lzma_resize_mutex);
+	struct z_erofs_lzma_cfgs *lzma = data;
 	unsigned int dict_size, i;
 	struct z_erofs_lzma *strm, *head = NULL;
 	int err;
@@ -143,6 +143,7 @@ again:
 	DBG_BUGON(z_erofs_lzma_head);
 	z_erofs_lzma_head = head;
 	spin_unlock(&z_erofs_lzma_lock);
+	wake_up_all(&z_erofs_lzma_wq);
 
 	z_erofs_lzma_max_dictsize = dict_size;
 	mutex_unlock(&lzma_resize_mutex);
@@ -150,13 +151,13 @@ again:
 }
 
 int z_erofs_lzma_decompress(struct z_erofs_decompress_req *rq,
-			    struct page **pagepool)
+			    struct page **pgpl)
 {
 	const unsigned int nrpages_out =
 		PAGE_ALIGN(rq->pageofs_out + rq->outputsize) >> PAGE_SHIFT;
 	const unsigned int nrpages_in =
 		PAGE_ALIGN(rq->inputsize) >> PAGE_SHIFT;
-	unsigned int inputmargin, inlen, outlen, pageofs;
+	unsigned int inlen, outlen, pageofs;
 	struct z_erofs_lzma *strm;
 	u8 *kin;
 	bool bounced = false;
@@ -164,16 +165,13 @@ int z_erofs_lzma_decompress(struct z_erofs_decompress_req *rq,
 
 	/* 1. get the exact LZMA compressed size */
 	kin = kmap(*rq->in);
-	inputmargin = 0;
-	while (!kin[inputmargin & ~PAGE_MASK])
-		if (!(++inputmargin & ~PAGE_MASK))
-			break;
-
-	if (inputmargin >= PAGE_SIZE) {
+	err = z_erofs_fixup_insize(rq, kin + rq->pageofs_in,
+			min_t(unsigned int, rq->inputsize,
+			      rq->sb->s_blocksize - rq->pageofs_in));
+	if (err) {
 		kunmap(*rq->in);
-		return -EFSCORRUPTED;
+		return err;
 	}
-	rq->inputsize -= inputmargin;
 
 	/* 2. get an available lzma context */
 again:
@@ -193,9 +191,9 @@ again:
 	xz_dec_microlzma_reset(strm->state, inlen, outlen,
 			       !rq->partial_decoding);
 	pageofs = rq->pageofs_out;
-	strm->buf.in = kin + inputmargin;
+	strm->buf.in = kin + rq->pageofs_in;
 	strm->buf.in_pos = 0;
-	strm->buf.in_size = min_t(u32, inlen, PAGE_SIZE - inputmargin);
+	strm->buf.in_size = min_t(u32, inlen, PAGE_SIZE - rq->pageofs_in);
 	inlen -= strm->buf.in_size;
 	strm->buf.out = NULL;
 	strm->buf.out_pos = 0;
@@ -219,6 +217,15 @@ again:
 			strm->buf.out_size = min_t(u32, outlen,
 						   PAGE_SIZE - pageofs);
 			outlen -= strm->buf.out_size;
+			if (!rq->out[no] && rq->fillgaps) {	/* deduped */
+				rq->out[no] = erofs_allocpage(pgpl, rq->gfp);
+				if (!rq->out[no]) {
+					err = -ENOMEM;
+					break;
+				}
+				set_page_private(rq->out[no],
+						 Z_EROFS_SHORTLIVED_PAGE);
+			}
 			if (rq->out[no])
 				strm->buf.out = kmap(rq->out[no]) + pageofs;
 			pageofs = 0;
@@ -257,8 +264,11 @@ again:
 
 			DBG_BUGON(erofs_page_is_managed(EROFS_SB(rq->sb),
 							rq->in[j]));
-			tmppage = erofs_allocpage(pagepool,
-						  GFP_KERNEL | __GFP_NOFAIL);
+			tmppage = erofs_allocpage(pgpl, rq->gfp);
+			if (!tmppage) {
+				err = -ENOMEM;
+				goto failed;
+			}
 			set_page_private(tmppage, Z_EROFS_SHORTLIVED_PAGE);
 			copy_highpage(tmppage, rq->in[j]);
 			rq->in[j] = tmppage;
@@ -276,8 +286,9 @@ again:
 			break;
 		}
 	}
+failed:
 	if (no < nrpages_out && strm->buf.out)
-		kunmap(rq->in[no]);
+		kunmap(rq->out[no]);
 	if (ni < nrpages_in)
 		kunmap(rq->in[ni]);
 	/* 4. push back LZMA stream context to the global list */

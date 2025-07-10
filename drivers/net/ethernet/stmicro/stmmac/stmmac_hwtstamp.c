@@ -12,8 +12,11 @@
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/delay.h>
+#include <linux/ptp_clock_kernel.h>
 #include "common.h"
 #include "stmmac_ptp.h"
+#include "dwmac4.h"
+#include "stmmac.h"
 
 static void config_hw_tstamping(void __iomem *ioaddr, u32 data)
 {
@@ -159,6 +162,60 @@ static void get_systime(void __iomem *ioaddr, u64 *systime)
 		*systime = ns + (sec1 * 1000000000ULL);
 }
 
+static void get_ptptime(void __iomem *ptpaddr, u64 *ptp_time)
+{
+	u64 ns;
+
+	ns = readl(ptpaddr + PTP_ATNR);
+	ns += readl(ptpaddr + PTP_ATSR) * NSEC_PER_SEC;
+
+	*ptp_time = ns;
+}
+
+static void timestamp_interrupt(struct stmmac_priv *priv)
+{
+	u32 num_snapshot, ts_status, tsync_int;
+	struct ptp_clock_event event;
+	u32 acr_value, channel;
+	unsigned long flags;
+	u64 ptp_time;
+	int i;
+
+	if (priv->plat->int_snapshot_en) {
+		wake_up(&priv->tstamp_busy_wait);
+		return;
+	}
+
+	tsync_int = readl(priv->ioaddr + GMAC_INT_STATUS) & GMAC_INT_TSIE;
+
+	if (!tsync_int)
+		return;
+
+	/* Read timestamp status to clear interrupt from either external
+	 * timestamp or start/end of PPS.
+	 */
+	ts_status = readl(priv->ioaddr + GMAC_TIMESTAMP_STATUS);
+
+	if (!priv->plat->ext_snapshot_en)
+		return;
+
+	num_snapshot = (ts_status & GMAC_TIMESTAMP_ATSNS_MASK) >>
+		       GMAC_TIMESTAMP_ATSNS_SHIFT;
+
+	acr_value = readl(priv->ptpaddr + PTP_ACR);
+	channel = ilog2(FIELD_GET(PTP_ACR_MASK, acr_value));
+
+	for (i = 0; i < num_snapshot; i++) {
+		read_lock_irqsave(&priv->ptp_lock, flags);
+		get_ptptime(priv->ptpaddr, &ptp_time);
+		read_unlock_irqrestore(&priv->ptp_lock, flags);
+		event.type = PTP_CLOCK_EXTTS;
+		event.index = channel;
+		event.timestamp = ptp_time;
+		ptp_clock_event(priv->ptp_clock, &event);
+	}
+}
+
 const struct stmmac_hwtimestamp stmmac_ptp = {
 	.config_hw_tstamping = config_hw_tstamping,
 	.init_systime = init_systime,
@@ -166,4 +223,6 @@ const struct stmmac_hwtimestamp stmmac_ptp = {
 	.config_addend = config_addend,
 	.adjust_systime = adjust_systime,
 	.get_systime = get_systime,
+	.get_ptptime = get_ptptime,
+	.timestamp_interrupt = timestamp_interrupt,
 };

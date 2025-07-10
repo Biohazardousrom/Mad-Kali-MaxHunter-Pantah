@@ -30,26 +30,12 @@
 #include <asm/debug-monitors.h>
 #include <asm/processor.h>
 
-extern struct exception_table_entry __start___kvm_ex_table;
-extern struct exception_table_entry __stop___kvm_ex_table;
+struct kvm_exception_table_entry {
+	int insn, fixup;
+};
 
-/* Check whether the FP regs were dirtied while in the host-side run loop: */
-static inline bool update_fp_enabled(struct kvm_vcpu *vcpu)
-{
-	/*
-	 * When the system doesn't support FP/SIMD, we cannot rely on
-	 * the _TIF_FOREIGN_FPSTATE flag. However, we always inject an
-	 * abort on the very first access to FP and thus we should never
-	 * see KVM_ARM64_FP_ENABLED. For added safety, make sure we always
-	 * trap the accesses.
-	 */
-	if (!system_supports_fpsimd() ||
-	    vcpu->arch.flags & KVM_ARM64_FP_FOREIGN_FPSTATE)
-		vcpu->arch.flags &= ~(KVM_ARM64_FP_ENABLED |
-				      KVM_ARM64_FP_HOST);
-
-	return !!(vcpu->arch.flags & KVM_ARM64_FP_ENABLED);
-}
+extern struct kvm_exception_table_entry __start___kvm_ex_table;
+extern struct kvm_exception_table_entry __stop___kvm_ex_table;
 
 /* Save the 32-bit only FPSIMD system register state */
 static inline void __fpsimd_save_fpexc32(struct kvm_vcpu *vcpu)
@@ -89,12 +75,28 @@ static inline void __activate_traps_common(struct kvm_vcpu *vcpu)
 	 * EL1 instead of being trapped to EL2.
 	 */
 	if (kvm_arm_support_pmu_v3()) {
+		struct kvm_cpu_context *hctxt;
+
 		write_sysreg(0, pmselr_el0);
+
+		hctxt = &this_cpu_ptr(&kvm_host_data)->host_ctxt;
+		ctxt_sys_reg(hctxt, PMUSERENR_EL0) = read_sysreg(pmuserenr_el0);
 		write_sysreg(ARMV8_PMU_USERENR_MASK, pmuserenr_el0);
 	}
 
 	vcpu->arch.mdcr_el2_host = read_sysreg(mdcr_el2);
 	write_sysreg(vcpu->arch.mdcr_el2, mdcr_el2);
+
+	if (cpus_have_final_cap(ARM64_SME)) {
+		sysreg_clear_set_s(SYS_HFGRTR_EL2,
+				   HFGxTR_EL2_nSMPRI_EL1_MASK |
+				   HFGxTR_EL2_nTPIDR2_EL0_MASK,
+				   0);
+		sysreg_clear_set_s(SYS_HFGWTR_EL2,
+				   HFGxTR_EL2_nSMPRI_EL1_MASK |
+				   HFGxTR_EL2_nTPIDR2_EL0_MASK,
+				   0);
+	}
 }
 
 static inline void __deactivate_traps_common(struct kvm_vcpu *vcpu)
@@ -102,8 +104,21 @@ static inline void __deactivate_traps_common(struct kvm_vcpu *vcpu)
 	write_sysreg(vcpu->arch.mdcr_el2_host, mdcr_el2);
 
 	write_sysreg(0, hstr_el2);
-	if (kvm_arm_support_pmu_v3())
-		write_sysreg(0, pmuserenr_el0);
+	if (kvm_arm_support_pmu_v3()) {
+		struct kvm_cpu_context *hctxt;
+
+		hctxt = &this_cpu_ptr(&kvm_host_data)->host_ctxt;
+		write_sysreg(ctxt_sys_reg(hctxt, PMUSERENR_EL0), pmuserenr_el0);
+	}
+
+	if (cpus_have_final_cap(ARM64_SME)) {
+		sysreg_clear_set_s(SYS_HFGRTR_EL2, 0,
+				   HFGxTR_EL2_nSMPRI_EL1_MASK |
+				   HFGxTR_EL2_nTPIDR2_EL0_MASK);
+		sysreg_clear_set_s(SYS_HFGWTR_EL2, 0,
+				   HFGxTR_EL2_nSMPRI_EL1_MASK |
+				   HFGxTR_EL2_nTPIDR2_EL0_MASK);
+	}
 }
 
 static inline void ___activate_traps(struct kvm_vcpu *vcpu)
@@ -146,6 +161,10 @@ static inline void __hyp_sve_restore_guest(struct kvm_vcpu *vcpu)
 	write_sysreg_el1(__vcpu_sys_reg(vcpu, ZCR_EL1), SYS_ZCR);
 }
 
+static void kvm_hyp_handle_fpsimd_host(struct kvm_vcpu *vcpu);
+
+static void __deactivate_fpsimd_traps(struct kvm_vcpu *vcpu);
+
 /*
  * We trap the first access to the FP/SIMD to save the host context and
  * restore the guest context lazily.
@@ -156,7 +175,6 @@ static bool kvm_hyp_handle_fpsimd(struct kvm_vcpu *vcpu, u64 *exit_code)
 {
 	bool sve_guest;
 	u8 esr_ec;
-	u64 reg;
 
 	if (!system_supports_fpsimd())
 		return false;
@@ -169,26 +187,16 @@ static bool kvm_hyp_handle_fpsimd(struct kvm_vcpu *vcpu, u64 *exit_code)
 		return false;
 
 	/* Valid trap.  Switch the context: */
-	if (has_vhe()) {
-		reg = CPACR_EL1_FPEN;
-		if (sve_guest)
-			reg |= CPACR_EL1_ZEN;
 
-		sysreg_clear_set(cpacr_el1, 0, reg);
-	} else {
-		reg = CPTR_EL2_TFP;
-		if (sve_guest)
-			reg |= CPTR_EL2_TZ;
-
-		sysreg_clear_set(cptr_el2, reg, 0);
-	}
+	/* First disable enough traps to allow us to update the registers */
+	__deactivate_fpsimd_traps(vcpu);
 	isb();
 
-	if (vcpu->arch.flags & KVM_ARM64_FP_HOST) {
-		__fpsimd_save_state(vcpu->arch.host_fpsimd_state);
-		vcpu->arch.flags &= ~KVM_ARM64_FP_HOST;
-	}
+	/* Write out the host state if it's in the registers */
+	if (vcpu->arch.fp_state == FP_STATE_HOST_OWNED)
+		kvm_hyp_handle_fpsimd_host(vcpu);
 
+	/* Restore the guest state */
 	if (sve_guest)
 		__hyp_sve_restore_guest(vcpu);
 	else
@@ -198,7 +206,7 @@ static bool kvm_hyp_handle_fpsimd(struct kvm_vcpu *vcpu, u64 *exit_code)
 	if (!(read_sysreg(hcr_el2) & HCR_RW))
 		write_sysreg(__vcpu_sys_reg(vcpu, FPEXC32_EL2), fpexc32_el2);
 
-	vcpu->arch.flags |= KVM_ARM64_FP_ENABLED;
+	vcpu->arch.fp_state = FP_STATE_GUEST_OWNED;
 
 	return true;
 }
@@ -258,7 +266,7 @@ static inline bool handle_tx2_tvm(struct kvm_vcpu *vcpu)
 	return true;
 }
 
-static inline bool esr_is_ptrauth_trap(u32 esr)
+static inline bool esr_is_ptrauth_trap(u64 esr)
 {
 	switch (esr_sys64_to_sysreg(esr)) {
 	case SYS_APIAKEYLO_EL1:
@@ -402,6 +410,24 @@ static inline bool kvm_hyp_handle_exit(struct kvm_vcpu *vcpu, u64 *exit_code)
 	return false;
 }
 
+static inline void synchronize_vcpu_pstate(struct kvm_vcpu *vcpu, u64 *exit_code)
+{
+	/*
+	 * Check for the conditions of Cortex-A510's #2077057. When these occur
+	 * SPSR_EL2 can't be trusted, but isn't needed either as it is
+	 * unchanged from the value in vcpu_gp_regs(vcpu)->pstate.
+	 * Are we single-stepping the guest, and took a PAC exception from the
+	 * active-not-pending state?
+	 */
+	if (cpus_have_final_cap(ARM64_WORKAROUND_2077057)		&&
+	    vcpu->guest_debug & KVM_GUESTDBG_SINGLESTEP			&&
+	    *vcpu_cpsr(vcpu) & DBG_SPSR_SS				&&
+	    ESR_ELx_EC(read_sysreg_el2(SYS_ESR)) == ESR_ELx_EC_PAC)
+		write_sysreg_el2(*vcpu_cpsr(vcpu), SYS_SPSR);
+
+	vcpu->arch.ctxt.regs.pstate = read_sysreg_el2(SYS_SPSR);
+}
+
 /*
  * Return true when we were able to fixup the guest exit and should return to
  * the guest, false when we should restore the host state and return to the
@@ -413,7 +439,7 @@ static inline bool fixup_guest_exit(struct kvm_vcpu *vcpu, u64 *exit_code)
 	 * Save PSTATE early so that we can evaluate the vcpu mode
 	 * early on.
 	 */
-	vcpu->arch.ctxt.regs.pstate = read_sysreg_el2(SYS_SPSR);
+	synchronize_vcpu_pstate(vcpu, exit_code);
 
 	/*
 	 * Check whether we want to repaint the state one way or
@@ -466,7 +492,7 @@ static inline void __kvm_unexpected_el2_exception(void)
 {
 	extern char __guest_exit_panic[];
 	unsigned long addr, fixup;
-	struct exception_table_entry *entry, *end;
+	struct kvm_exception_table_entry *entry, *end;
 	unsigned long elr_el2 = read_sysreg(elr_el2);
 
 	entry = &__start___kvm_ex_table;

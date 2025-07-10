@@ -37,8 +37,16 @@ $(obj)/%-fips-arch.o: $(crypto-arm64-fips-src)/%.c FORCE
 $(obj)/%-fips-arch.o: $(crypto-arm64-fips-src)/%.S FORCE
 	$(call if_changed_rule,as_o_S)
 
-$(obj)/%: $(crypto-arm64-fips-src)/%_shipped
-	$(call cmd,shipped)
+quiet_cmd_perlasm = PERLASM $@
+      cmd_perlasm = $(PERL) $(<) void $(@)
+
+$(obj)/%-core.S: $(crypto-arm64-fips-src)/%-armv8.pl
+	$(call cmd,perlasm)
+
+$(obj)/sha256-core.S: $(crypto-arm64-fips-src)/sha512-armv8.pl
+	$(call cmd,perlasm)
+
+clean-files += sha256-core.S sha512-core.S
 
 $(obj)/%-fips-arch.o: $(obj)/%.S FORCE
 	$(call if_changed_rule,as_o_S)

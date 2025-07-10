@@ -132,6 +132,7 @@ enum qca9377_chip_id_rev {
 /* WCN3990 1.0 definitions */
 #define WCN3990_HW_1_0_DEV_VERSION	ATH10K_HW_WCN3990
 #define WCN3990_HW_1_0_FW_DIR		ATH10K_FW_DIR "/WCN3990/hw1.0"
+#define WCN3990_HW_1_0_BOARD_DATA_FILE "board.bin"
 
 #define ATH10K_FW_FILE_BASE		"firmware"
 #define ATH10K_FW_API_MAX		6
@@ -510,6 +511,8 @@ struct ath10k_hw_clk_params {
 	u32 outdiv;
 };
 
+struct htt_rx_desc_ops;
+
 struct ath10k_hw_params {
 	u32 id;
 	u16 dev_id;
@@ -561,6 +564,9 @@ struct ath10k_hw_params {
 	 * frames encrypted and expect software do decryption.
 	 */
 	bool sw_decrypt_mcast_mgmt;
+
+	/* Rx descriptor abstraction */
+	const struct ath10k_htt_rx_desc_ops *rx_desc_ops;
 
 	const struct ath10k_hw_ops *hw_ops;
 
@@ -626,18 +632,24 @@ struct ath10k_hw_params {
 
 	/* provides bitrates for sta_statistics using WMI_TLV_PEER_STATS_INFO_EVENTID */
 	bool supports_peer_stats_info;
+
+	bool dynamic_sar_support;
+
+	bool hw_restart_disconnect;
+
+	bool use_fw_tx_credits;
+
+	bool delay_unmap_buffer;
 };
 
-struct htt_rx_desc;
 struct htt_resp;
 struct htt_data_tx_completion_ext;
+struct htt_rx_ring_rx_desc_offsets;
 
 /* Defines needed for Rx descriptor abstraction */
 struct ath10k_hw_ops {
-	int (*rx_desc_get_l3_pad_bytes)(struct htt_rx_desc *rxd);
 	void (*set_coverage_class)(struct ath10k *ar, s16 value);
 	int (*enable_pll_clk)(struct ath10k *ar);
-	bool (*rx_desc_get_msdu_limit_error)(struct htt_rx_desc *rxd);
 	int (*tx_data_rssi_pad_bytes)(struct htt_resp *htt);
 	int (*is_rssi_enable)(struct htt_resp *resp);
 };
@@ -649,24 +661,6 @@ extern const struct ath10k_hw_ops qca6174_sdio_ops;
 extern const struct ath10k_hw_ops wcn3990_ops;
 
 extern const struct ath10k_hw_clk_params qca6174_clk[];
-
-static inline int
-ath10k_rx_desc_get_l3_pad_bytes(struct ath10k_hw_params *hw,
-				struct htt_rx_desc *rxd)
-{
-	if (hw->hw_ops->rx_desc_get_l3_pad_bytes)
-		return hw->hw_ops->rx_desc_get_l3_pad_bytes(rxd);
-	return 0;
-}
-
-static inline bool
-ath10k_rx_desc_msdu_limit_error(struct ath10k_hw_params *hw,
-				struct htt_rx_desc *rxd)
-{
-	if (hw->hw_ops->rx_desc_get_msdu_limit_error)
-		return hw->hw_ops->rx_desc_get_msdu_limit_error(rxd);
-	return false;
-}
 
 static inline int
 ath10k_tx_data_rssi_get_pad_bytes(struct ath10k_hw_params *hw,

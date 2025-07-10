@@ -398,7 +398,7 @@ static int s2250_s_ctrl(struct v4l2_ctrl *ctrl)
 }
 
 static int s2250_set_fmt(struct v4l2_subdev *sd,
-		struct v4l2_subdev_pad_config *cfg,
+		struct v4l2_subdev_state *sd_state,
 		struct v4l2_subdev_format *format)
 {
 	struct v4l2_mbus_framefmt *fmt = &format->format;
@@ -601,7 +601,7 @@ fail:
 	return err;
 }
 
-static int s2250_remove(struct i2c_client *client)
+static void s2250_remove(struct i2c_client *client)
 {
 	struct s2250 *state = to_state(i2c_get_clientdata(client));
 
@@ -609,7 +609,6 @@ static int s2250_remove(struct i2c_client *client)
 	v4l2_device_unregister_subdev(&state->sd);
 	v4l2_ctrl_handler_free(&state->hdl);
 	kfree(state);
-	return 0;
 }
 
 static const struct i2c_device_id s2250_id[] = {

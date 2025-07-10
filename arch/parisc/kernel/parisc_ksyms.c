@@ -21,6 +21,7 @@ EXPORT_SYMBOL(memset);
 #include <linux/atomic.h>
 EXPORT_SYMBOL(__xchg8);
 EXPORT_SYMBOL(__xchg32);
+EXPORT_SYMBOL(__cmpxchg_u8);
 EXPORT_SYMBOL(__cmpxchg_u32);
 EXPORT_SYMBOL(__cmpxchg_u64);
 #ifdef CONFIG_SMP
@@ -32,7 +33,6 @@ EXPORT_SYMBOL(__xchg64);
 
 #include <linux/uaccess.h>
 EXPORT_SYMBOL(lclear_user);
-EXPORT_SYMBOL(lstrnlen_user);
 
 #ifndef CONFIG_64BIT
 /* Needed so insmod can set dp value */

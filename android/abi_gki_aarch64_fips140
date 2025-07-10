@@ -4,13 +4,10 @@
   __put_task_struct
 
 # required by fips140.ko
-  add_random_ready_callback
   aead_register_instance
   ahash_register_instance
   arch_timer_read_counter
   bcmp
-  cancel_work_sync
-  __cfi_slowpath
   complete_all
   completion_done
   cpu_have_feature
@@ -68,8 +65,8 @@
   crypto_skcipher_decrypt
   crypto_skcipher_encrypt
   crypto_skcipher_setkey
-  crypto_spawn_tfm2
   crypto_spawn_tfm
+  crypto_spawn_tfm2
   crypto_unregister_aead
   crypto_unregister_alg
   crypto_unregister_rng
@@ -79,12 +76,13 @@
   crypto_unregister_skciphers
   crypto_unregister_template
   crypto_unregister_templates
-  del_random_ready_callback
   down_write
+  fortify_panic
   fpsimd_context_busy
   get_random_bytes
   __init_swait_queue_head
   irq_stat
+  jiffies
   kasan_flag_enabled
   kernel_neon_begin
   kernel_neon_end
@@ -92,7 +90,7 @@
   kfree_sensitive
   __kmalloc
   kmalloc_caches
-  kmem_cache_alloc_trace
+  kmalloc_trace
   kmemdup
   ktime_get
   __list_add_valid
@@ -105,8 +103,7 @@
   panic
   preempt_schedule
   preempt_schedule_notrace
-  printk
-  queue_work_on
+  _printk
   ___ratelimit
   _raw_spin_lock
   _raw_spin_unlock
@@ -129,10 +126,10 @@
   __stack_chk_fail
   strcmp
   strlcat
-  strlcpy
   strlen
   strncmp
-  system_wq
+  strnlen
+  strscpy
   __traceiter_android_vh_aes_decrypt
   __traceiter_android_vh_aes_encrypt
   __traceiter_android_vh_aes_expandkey

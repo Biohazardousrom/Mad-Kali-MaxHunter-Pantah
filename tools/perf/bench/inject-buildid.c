@@ -361,7 +361,7 @@ static int inject_build_id(struct bench_data *data, u64 *max_rss)
 		return -1;
 
 	for (i = 0; i < nr_mmaps; i++) {
-		int idx = rand() % (nr_dsos - 1);
+		int idx = rand() % nr_dsos;
 		struct bench_dso *dso = &dsos[idx];
 		u64 timestamp = rand() % 1000000;
 
@@ -380,7 +380,7 @@ static int inject_build_id(struct bench_data *data, u64 *max_rss)
 		}
 	}
 
-	/* tihs makes the child to finish */
+	/* this makes the child to finish */
 	close(data->input_pipe[1]);
 
 	wait4(data->pid, &status, 0, &rusage);

@@ -8,6 +8,7 @@
 
 #include <stdbool.h>
 #include <stdio.h>
+#include <linux/compiler.h>
 
 #ifdef __ANDROID__
 static int test_case_pass;
@@ -99,9 +100,15 @@ static inline int _test_operator_##name(const char *func, int line,	\
 {									\
 	bool pass;							\
 	switch (o) {							\
-	case _eq: pass = a == b; break;					\
-	case _ne: pass = a != b; break;					\
-	case _ge: pass = a >= b; break;					\
+	case _eq:							\
+		pass = a == b;						\
+		break;							\
+	case _ne:							\
+		pass = a != b;						\
+		break;							\
+	case _ge:							\
+		pass = a >= b;						\
+		break;							\
 	}								\
 									\
 	if (!pass)							\
@@ -126,19 +133,19 @@ _TEST_OPERATOR(vp, void *, "%px")
 _TEST_OPERATOR(cp, char *, "%px")
 
 #define _CALL_TO(_type, name, a, b, o)					\
-	_type:_test_operator_##name(__func__, __LINE__,			\
+	_test_operator_##name(__func__, __LINE__,			\
 				  (_type) (long long) (a),		\
 				  (_type) (long long) (b), o)
 
 #define TESTOPERATOR(a, b, o)						\
 	do {								\
 		if (_Generic((a),					\
-			     _CALL_TO(int, i, a, b, o),			\
-			     _CALL_TO(unsigned int, ui, a, b, o),	\
-			     _CALL_TO(unsigned long, lui, a, b, o),	\
-			     _CALL_TO(ssize_t, ss, a, b, o),		\
-			     _CALL_TO(void *, vp, a, b, o),		\
-			     _CALL_TO(char *, cp, a, b, o)		\
+			int : _CALL_TO(int, i, a, b, o),		\
+			unsigned int : _CALL_TO(unsigned int, ui, a, b, o),	\
+			unsigned long : _CALL_TO(unsigned long, lui, a, b, o),	\
+			ssize_t : _CALL_TO(ssize_t, ss, a, b, o),		\
+			void * : _CALL_TO(void *, vp, a, b, o),		\
+			char * : _CALL_TO(char *, cp, a, b, o)		\
 		))							\
 			goto out;					\
 	} while (false)
@@ -149,8 +156,6 @@ _TEST_OPERATOR(cp, char *, "%px")
 
 /* For testing a syscall that returns 0 on success and sets errno otherwise */
 #define TESTSYSCALL(statement) TESTCONDERR((statement) == 0)
-
-#define ARRAY_SIZE(arr) (sizeof(arr) / sizeof(arr[0]))
 
 static inline void print_bytes(const void *data, size_t size)
 {

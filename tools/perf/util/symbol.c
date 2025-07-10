@@ -291,7 +291,7 @@ struct symbol *symbol__new(u64 start, u64 len, u8 binding, u8 type, const char *
 	if (symbol_conf.priv_size) {
 		if (symbol_conf.init_annotation) {
 			struct annotation *notes = (void *)sym;
-			pthread_mutex_init(&notes->lock, NULL);
+			annotation__init(notes);
 		}
 		sym = ((void *)sym) + symbol_conf.priv_size;
 	}
@@ -311,6 +311,13 @@ struct symbol *symbol__new(u64 start, u64 len, u8 binding, u8 type, const char *
 
 void symbol__delete(struct symbol *sym)
 {
+	if (symbol_conf.priv_size) {
+		if (symbol_conf.init_annotation) {
+			struct annotation *notes = symbol__annotation(sym);
+
+			annotation__exit(notes);
+		}
+	}
 	free(((void *)sym) - symbol_conf.priv_size);
 }
 
@@ -717,6 +724,10 @@ static int map__process_kallsym_symbol(void *arg, const char *name,
 	struct rb_root_cached *root = &dso->symbols;
 
 	if (!symbol_type__filter(type))
+		return 0;
+
+	/* Ignore local symbols for ARM modules */
+	if (name[0] == '$')
 		return 0;
 
 	/*
@@ -1357,10 +1368,23 @@ static int dso__load_kcore(struct dso *dso, struct map *map,
 
 	/* Find the kernel map using the '_stext' symbol */
 	if (!kallsyms__get_function_start(kallsyms_filename, "_stext", &stext)) {
+		u64 replacement_size = 0;
+
 		list_for_each_entry(new_map, &md.maps, node) {
-			if (stext >= new_map->start && stext < new_map->end) {
+			u64 new_size = new_map->end - new_map->start;
+
+			if (!(stext >= new_map->start && stext < new_map->end))
+				continue;
+
+			/*
+			 * On some architectures, ARM64 for example, the kernel
+			 * text can get allocated inside of the vmalloc segment.
+			 * Select the smallest matching segment, in case stext
+			 * falls within more than one in the list.
+			 */
+			if (!replacement_map || new_size < replacement_size) {
 				replacement_map = new_map;
-				break;
+				replacement_size = new_size;
 			}
 		}
 	}
@@ -1585,32 +1609,13 @@ int dso__load_bfd_symbols(struct dso *dso, const char *debugfile)
 	bfd *abfd;
 	u64 start, len;
 
-	abfd = bfd_openr(dso->long_name, NULL);
-	if (!abfd)
-		return -1;
-
-	if (!bfd_check_format(abfd, bfd_object)) {
-		pr_debug2("%s: cannot read %s bfd file.\n", __func__,
-			  dso->long_name);
-		goto out_close;
-	}
-
-	if (bfd_get_flavour(abfd) == bfd_target_elf_flavour)
-		goto out_close;
-
-	section = bfd_get_section_by_name(abfd, ".text");
-	if (section)
-		dso->text_offset = section->vma - section->filepos;
-
-	bfd_close(abfd);
-
 	abfd = bfd_openr(debugfile, NULL);
 	if (!abfd)
 		return -1;
 
 	if (!bfd_check_format(abfd, bfd_object)) {
 		pr_debug2("%s: cannot read %s bfd file.\n", __func__,
-			  debugfile);
+			  dso->long_name);
 		goto out_close;
 	}
 
@@ -1633,6 +1638,22 @@ int dso__load_bfd_symbols(struct dso *dso, const char *debugfile)
 	symbols_count = bfd_canonicalize_symtab(abfd, symbols);
 	if (symbols_count < 0)
 		goto out_free;
+
+	section = bfd_get_section_by_name(abfd, ".text");
+	if (section) {
+		for (i = 0; i < symbols_count; ++i) {
+			if (!strcmp(bfd_asymbol_name(symbols[i]), "__ImageBase") ||
+			    !strcmp(bfd_asymbol_name(symbols[i]), "__image_base__"))
+				break;
+		}
+		if (i < symbols_count) {
+			/* PE symbols can only have 4 bytes, so use .text high bits */
+			dso->text_offset = section->vma - (u32)section->vma;
+			dso->text_offset += (u32)bfd_asymbol_value(symbols[i]);
+		} else {
+			dso->text_offset = section->vma - section->filepos;
+		}
+	}
 
 	qsort(symbols, symbols_count, sizeof(asymbol *), bfd_symbols__cmpvalue);
 
@@ -1744,8 +1765,8 @@ static int dso__find_perf_map(char *filebuf, size_t bufsz,
 
 	nsi = *nsip;
 
-	if (nsi->need_setns) {
-		snprintf(filebuf, bufsz, "/tmp/perf-%d.map", nsi->nstgid);
+	if (nsinfo__need_setns(nsi)) {
+		snprintf(filebuf, bufsz, "/tmp/perf-%d.map", nsinfo__nstgid(nsi));
 		nsinfo__mountns_enter(nsi, &nsc);
 		rc = access(filebuf, R_OK);
 		nsinfo__mountns_exit(&nsc);
@@ -1757,8 +1778,8 @@ static int dso__find_perf_map(char *filebuf, size_t bufsz,
 	if (nnsi) {
 		nsinfo__put(nsi);
 
-		nnsi->need_setns = false;
-		snprintf(filebuf, bufsz, "/tmp/perf-%d.map", nnsi->tgid);
+		nsinfo__clear_need_setns(nnsi);
+		snprintf(filebuf, bufsz, "/tmp/perf-%d.map", nsinfo__tgid(nnsi));
 		*nsip = nnsi;
 		rc = 0;
 	}
@@ -1783,6 +1804,7 @@ int dso__load(struct dso *dso, struct map *map)
 	char newmapname[PATH_MAX];
 	const char *map_path = dso->long_name;
 
+	mutex_lock(&dso->lock);
 	perfmap = strncmp(dso->name, "/tmp/perf-", 10) == 0;
 	if (perfmap) {
 		if (dso->nsinfo && (dso__find_perf_map(newmapname,
@@ -1792,7 +1814,6 @@ int dso__load(struct dso *dso, struct map *map)
 	}
 
 	nsinfo__mountns_enter(dso->nsinfo, &nsc);
-	pthread_mutex_lock(&dso->lock);
 
 	/* check again under the dso->lock */
 	if (dso__loaded(dso)) {
@@ -1873,6 +1894,16 @@ int dso__load(struct dso *dso, struct map *map)
 			nsinfo__mountns_exit(&nsc);
 
 		is_reg = is_regular_file(name);
+		if (!is_reg && errno == ENOENT && dso->nsinfo) {
+			char *new_name = filename_with_chroot(dso->nsinfo->pid,
+							      name);
+			if (new_name) {
+				is_reg = is_regular_file(new_name);
+				strlcpy(name, new_name, PATH_MAX);
+				free(new_name);
+			}
+		}
+
 #ifdef HAVE_LIBBFD_SUPPORT
 		if (is_reg)
 			bfdrc = dso__load_bfd_symbols(dso, name);
@@ -1946,7 +1977,7 @@ out_free:
 		ret = 0;
 out:
 	dso__set_loaded(dso);
-	pthread_mutex_unlock(&dso->lock);
+	mutex_unlock(&dso->lock);
 	nsinfo__mountns_exit(&nsc);
 
 	return ret;
@@ -2207,6 +2238,8 @@ static int dso__load_kernel_sym(struct dso *dso, struct map *map)
 	int err;
 	const char *kallsyms_filename = NULL;
 	char *kallsyms_allocated_filename = NULL;
+	char *filename = NULL;
+
 	/*
 	 * Step 1: if the user specified a kallsyms or vmlinux filename, use
 	 * it and only it, reporting errors to the user if it cannot be used.
@@ -2229,6 +2262,20 @@ static int dso__load_kernel_sym(struct dso *dso, struct map *map)
 
 	if (!symbol_conf.ignore_vmlinux && symbol_conf.vmlinux_name != NULL) {
 		return dso__load_vmlinux(dso, map, symbol_conf.vmlinux_name, false);
+	}
+
+	/*
+	 * Before checking on common vmlinux locations, check if it's
+	 * stored as standard build id binary (not kallsyms) under
+	 * .debug cache.
+	 */
+	if (!symbol_conf.ignore_vmlinux_buildid)
+		filename = __dso__build_id_filename(dso, NULL, 0, false, false);
+	if (filename != NULL) {
+		err = dso__load_vmlinux(dso, map, filename, true);
+		if (err > 0)
+			return err;
+		free(filename);
 	}
 
 	if (!symbol_conf.ignore_vmlinux && vmlinux_path != NULL) {
@@ -2266,11 +2313,13 @@ do_kallsyms:
 static int dso__load_guest_kernel_sym(struct dso *dso, struct map *map)
 {
 	int err;
-	const char *kallsyms_filename = NULL;
+	const char *kallsyms_filename;
 	struct machine *machine = map__kmaps(map)->machine;
 	char path[PATH_MAX];
 
-	if (machine__is_default_guest(machine)) {
+	if (machine->kallsyms_filename) {
+		kallsyms_filename = machine->kallsyms_filename;
+	} else if (machine__is_default_guest(machine)) {
 		/*
 		 * if the user specified a vmlinux filename, use it and only
 		 * it, reporting errors to the user if it cannot be used.
@@ -2408,6 +2457,49 @@ int setup_intlist(struct intlist **list, const char *list_str,
 	return 0;
 }
 
+static int setup_addrlist(struct intlist **addr_list, struct strlist *sym_list)
+{
+	struct str_node *pos, *tmp;
+	unsigned long val;
+	char *sep;
+	const char *end;
+	int i = 0, err;
+
+	*addr_list = intlist__new(NULL);
+	if (!*addr_list)
+		return -1;
+
+	strlist__for_each_entry_safe(pos, tmp, sym_list) {
+		errno = 0;
+		val = strtoul(pos->s, &sep, 16);
+		if (errno || (sep == pos->s))
+			continue;
+
+		if (*sep != '\0') {
+			end = pos->s + strlen(pos->s) - 1;
+			while (end >= sep && isspace(*end))
+				end--;
+
+			if (end >= sep)
+				continue;
+		}
+
+		err = intlist__add(*addr_list, val);
+		if (err)
+			break;
+
+		strlist__remove(sym_list, pos);
+		i++;
+	}
+
+	if (i == 0) {
+		intlist__delete(*addr_list);
+		*addr_list = NULL;
+	}
+
+	return 0;
+}
+
 static bool symbol__read_kptr_restrict(void)
 {
 	bool value = false;
@@ -2491,6 +2583,10 @@ int symbol__init(struct perf_env *env)
 		       symbol_conf.sym_list_str, "symbol") < 0)
 		goto out_free_tid_list;
 
+	if (symbol_conf.sym_list &&
+	    setup_addrlist(&symbol_conf.addr_list, symbol_conf.sym_list) < 0)
+		goto out_free_sym_list;
+
 	if (setup_list(&symbol_conf.bt_stop_list,
 		       symbol_conf.bt_stop_list_str, "symbol") < 0)
 		goto out_free_sym_list;
@@ -2514,6 +2610,7 @@ int symbol__init(struct perf_env *env)
 
 out_free_sym_list:
 	strlist__delete(symbol_conf.sym_list);
+	intlist__delete(symbol_conf.addr_list);
 out_free_tid_list:
 	intlist__delete(symbol_conf.tid_list);
 out_free_pid_list:
@@ -2535,6 +2632,7 @@ void symbol__exit(void)
 	strlist__delete(symbol_conf.comm_list);
 	intlist__delete(symbol_conf.tid_list);
 	intlist__delete(symbol_conf.pid_list);
+	intlist__delete(symbol_conf.addr_list);
 	vmlinux_path__exit();
 	symbol_conf.sym_list = symbol_conf.dso_list = symbol_conf.comm_list = NULL;
 	symbol_conf.bt_stop_list = NULL;
@@ -2584,4 +2682,26 @@ struct mem_info *mem_info__new(void)
 	if (mi)
 		refcount_set(&mi->refcnt, 1);
 	return mi;
+}
+
+/*
+ * Checks that user supplied symbol kernel files are accessible because
+ * the default mechanism for accessing elf files fails silently. i.e. if
+ * debug syms for a build ID aren't found perf carries on normally. When
+ * they are user supplied we should assume that the user doesn't want to
+ * silently fail.
+ */
+int symbol__validate_sym_arguments(void)
+{
+	if (symbol_conf.vmlinux_name &&
+	    access(symbol_conf.vmlinux_name, R_OK)) {
+		pr_err("Invalid file: %s\n", symbol_conf.vmlinux_name);
+		return -EINVAL;
+	}
+	if (symbol_conf.kallsyms_name &&
+	    access(symbol_conf.kallsyms_name, R_OK)) {
+		pr_err("Invalid file: %s\n", symbol_conf.kallsyms_name);
+		return -EINVAL;
+	}
+	return 0;
 }

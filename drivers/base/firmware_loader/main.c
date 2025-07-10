@@ -15,6 +15,7 @@
 #include <linux/kernel_read_file.h>
 #include <linux/module.h>
 #include <linux/init.h>
+#include <linux/initrd.h>
 #include <linux/timer.h>
 #include <linux/vmalloc.h>
 #include <linux/interrupt.h>
@@ -34,6 +35,7 @@
 #include <linux/syscore_ops.h>
 #include <linux/reboot.h>
 #include <linux/security.h>
+#include <linux/zstd.h>
 #include <linux/xz.h>
 
 #include <generated/utsrelease.h>
@@ -90,69 +92,9 @@ static inline struct fw_priv *to_fw_priv(struct kref *ref)
  * guarding for corner cases a global lock should be OK */
 DEFINE_MUTEX(fw_lock);
 
-static struct firmware_cache fw_cache;
+struct firmware_cache fw_cache;
 
-/* Builtin firmware support */
-
-#ifdef CONFIG_FW_LOADER
-
-extern struct builtin_fw __start_builtin_fw[];
-extern struct builtin_fw __end_builtin_fw[];
-
-static bool fw_copy_to_prealloc_buf(struct firmware *fw,
-				    void *buf, size_t size)
-{
-	if (!buf)
-		return true;
-	if (size < fw->size)
-		return false;
-	memcpy(buf, fw->data, fw->size);
-	return true;
-}
-
-static bool fw_get_builtin_firmware(struct firmware *fw, const char *name,
-				    void *buf, size_t size)
-{
-	struct builtin_fw *b_fw;
-
-	for (b_fw = __start_builtin_fw; b_fw != __end_builtin_fw; b_fw++) {
-		if (strcmp(name, b_fw->name) == 0) {
-			fw->size = b_fw->size;
-			fw->data = b_fw->data;
-			return fw_copy_to_prealloc_buf(fw, buf, size);
-		}
-	}
-
-	return false;
-}
-
-static bool fw_is_builtin_firmware(const struct firmware *fw)
-{
-	struct builtin_fw *b_fw;
-
-	for (b_fw = __start_builtin_fw; b_fw != __end_builtin_fw; b_fw++)
-		if (fw->data == b_fw->data)
-			return true;
-
-	return false;
-}
-
-#else /* Module case - no builtin firmware support */
-
-static inline bool fw_get_builtin_firmware(struct firmware *fw,
-					   const char *name, void *buf,
-					   size_t size)
-{
-	return false;
-}
-
-static inline bool fw_is_builtin_firmware(const struct firmware *fw)
-{
-	return false;
-}
-#endif
-
-static void fw_state_init(struct fw_priv *fw_priv)
+void fw_state_init(struct fw_priv *fw_priv)
 {
 	struct fw_state *fw_st = &fw_priv->fw_st;
 
@@ -222,13 +164,9 @@ static struct fw_priv *__lookup_fw_priv(const char *fw_name)
 }
 
 /* Returns 1 for batching firmware requests with the same name */
-static int alloc_lookup_fw_priv(const char *fw_name,
-				struct firmware_cache *fwc,
-				struct fw_priv **fw_priv,
-				void *dbuf,
-				size_t size,
-				size_t offset,
-				u32 opt_flags)
+int alloc_lookup_fw_priv(const char *fw_name, struct firmware_cache *fwc,
+			 struct fw_priv **fw_priv, void *dbuf, size_t size,
+			 size_t offset, u32 opt_flags)
 {
 	struct fw_priv *tmp;
 
@@ -283,7 +221,7 @@ static void __free_fw_priv(struct kref *ref)
 	kfree(fw_priv);
 }
 
-static void free_fw_priv(struct fw_priv *fw_priv)
+void free_fw_priv(struct fw_priv *fw_priv)
 {
 	struct firmware_cache *fwc = fw_priv->fwc;
 	spin_lock(&fwc->lock);
@@ -312,6 +250,8 @@ void fw_free_paged_buf(struct fw_priv *fw_priv)
 	fw_priv->pages = NULL;
 	fw_priv->page_array_size = 0;
 	fw_priv->nr_pages = 0;
+	fw_priv->data = NULL;
+	fw_priv->size = 0;
 }
 
 int fw_grow_paged_buf(struct fw_priv *fw_priv, int pages_needed)
@@ -364,9 +304,73 @@ int fw_map_paged_buf(struct fw_priv *fw_priv)
 #endif
 
 /*
+ * ZSTD-compressed firmware support
+ */
+#ifdef CONFIG_FW_LOADER_COMPRESS_ZSTD
+static int fw_decompress_zstd(struct device *dev, struct fw_priv *fw_priv,
+			      size_t in_size, const void *in_buffer)
+{
+	size_t len, out_size, workspace_size;
+	void *workspace, *out_buf;
+	zstd_dctx *ctx;
+	int err;
+
+	if (fw_priv->allocated_size) {
+		out_size = fw_priv->allocated_size;
+		out_buf = fw_priv->data;
+	} else {
+		zstd_frame_header params;
+
+		if (zstd_get_frame_header(&params, in_buffer, in_size) ||
+		    params.frameContentSize == ZSTD_CONTENTSIZE_UNKNOWN) {
+			dev_dbg(dev, "%s: invalid zstd header\n", __func__);
+			return -EINVAL;
+		}
+		out_size = params.frameContentSize;
+		out_buf = vzalloc(out_size);
+		if (!out_buf)
+			return -ENOMEM;
+	}
+
+	workspace_size = zstd_dctx_workspace_bound();
+	workspace = kvzalloc(workspace_size, GFP_KERNEL);
+	if (!workspace) {
+		err = -ENOMEM;
+		goto error;
+	}
+
+	ctx = zstd_init_dctx(workspace, workspace_size);
+	if (!ctx) {
+		dev_dbg(dev, "%s: failed to initialize context\n", __func__);
+		err = -EINVAL;
+		goto error;
+	}
+
+	len = zstd_decompress_dctx(ctx, out_buf, out_size, in_buffer, in_size);
+	if (zstd_is_error(len)) {
+		dev_dbg(dev, "%s: failed to decompress: %d\n", __func__,
+			zstd_get_error_code(len));
+		err = -EINVAL;
+		goto error;
+	}
+
+	if (!fw_priv->allocated_size)
+		fw_priv->data = out_buf;
+	fw_priv->size = len;
+	err = 0;
+
+ error:
+	kvfree(workspace);
+	if (err && !fw_priv->allocated_size)
+		vfree(out_buf);
+	return err;
+}
+#endif /* CONFIG_FW_LOADER_COMPRESS_ZSTD */
+
+/*
  * XZ-compressed firmware support
  */
-#ifdef CONFIG_FW_LOADER_COMPRESS
+#ifdef CONFIG_FW_LOADER_COMPRESS_XZ
 /* show an error and return the standard error code */
 static int fw_decompress_xz_error(struct device *dev, enum xz_ret xz_ret)
 {
@@ -431,11 +435,11 @@ static int fw_decompress_xz_pages(struct device *dev, struct fw_priv *fw_priv,
 
 		/* decompress onto the new allocated page */
 		page = fw_priv->pages[fw_priv->nr_pages - 1];
-		xz_buf.out = kmap(page);
+		xz_buf.out = kmap_local_page(page);
 		xz_buf.out_pos = 0;
 		xz_buf.out_size = PAGE_SIZE;
 		xz_ret = xz_dec_run(xz_dec, &xz_buf);
-		kunmap(page);
+		kunmap_local(xz_buf.out);
 		fw_priv->size += xz_buf.out_pos;
 		/* partial decompression means either end or error */
 		if (xz_buf.out_pos != PAGE_SIZE)
@@ -460,24 +464,85 @@ static int fw_decompress_xz(struct device *dev, struct fw_priv *fw_priv,
 	else
 		return fw_decompress_xz_pages(dev, fw_priv, in_size, in_buffer);
 }
-#endif /* CONFIG_FW_LOADER_COMPRESS */
+#endif /* CONFIG_FW_LOADER_COMPRESS_XZ */
 
 /* direct firmware loading support */
-static char fw_path_para[256];
+#define CUSTOM_FW_PATH_COUNT	10
+#define PATH_SIZE		255
+static char fw_path_para[CUSTOM_FW_PATH_COUNT][PATH_SIZE];
 static const char * const fw_path[] = {
-	fw_path_para,
+	fw_path_para[0],
+	fw_path_para[1],
+	fw_path_para[2],
+	fw_path_para[3],
+	fw_path_para[4],
+	fw_path_para[5],
+	fw_path_para[6],
+	fw_path_para[7],
+	fw_path_para[8],
+	fw_path_para[9],
 	"/lib/firmware/updates/" UTS_RELEASE,
 	"/lib/firmware/updates",
 	"/lib/firmware/" UTS_RELEASE,
 	"/lib/firmware"
 };
 
+static char strpath[PATH_SIZE * CUSTOM_FW_PATH_COUNT];
+static int firmware_param_path_set(const char *val, const struct kernel_param *kp)
+{
+	int i;
+	char *path, *end;
+
+	strscpy(strpath, val, sizeof(strpath));
+	/* Remove leading and trailing spaces from path */
+	path = strim(strpath);
+	for (i = 0; path && i < CUSTOM_FW_PATH_COUNT; i++) {
+		end = strchr(path, ',');
+
+		/* Skip continuous token case, for example ',,,' */
+		if (end == path) {
+			i--;
+			path = ++end;
+			continue;
+		}
+
+		if (end != NULL)
+			*end = '\0';
+		else {
+			/* end of the string reached and no other tockens ','  */
+			strscpy(fw_path_para[i], path, PATH_SIZE);
+			break;
+		}
+
+		strscpy(fw_path_para[i], path, PATH_SIZE);
+		path = ++end;
+	}
+
+	return 0;
+}
+
+static int firmware_param_path_get(char *buffer, const struct kernel_param *kp)
+{
+	int count = 0, i;
+
+	for (i = 0; i < CUSTOM_FW_PATH_COUNT; i++)
+		if (strlen(fw_path_para[i]) != 0)
+			count += sysfs_emit_at(buffer, count, "%s,", fw_path_para[i]);
+
+	return count;
+}
 /*
- * Typical usage is that passing 'firmware_class.path=$CUSTOMIZED_PATH'
+ * Typical usage is that passing 'firmware_class.path=/vendor,/firwmare_mnt'
  * from kernel command line because firmware_class is generally built in
- * kernel instead of module.
+ * kernel instead of module. ',' is used as delimiter for setting 10
+ * custom paths for firmware loader.
  */
-module_param_string(path, fw_path_para, sizeof(fw_path_para), 0644);
+
+static const struct kernel_param_ops firmware_param_ops = {
+	.set = firmware_param_path_set,
+	.get = firmware_param_path_get,
+};
+module_param_cb(path, &firmware_param_ops, NULL, 0644);
 MODULE_PARM_DESC(path, "customized firmware image search path with a higher priority than default path");
 
 static int
@@ -505,6 +570,7 @@ fw_get_filesystem_firmware(struct device *device, struct fw_priv *fw_priv,
 	if (!path)
 		return -ENOMEM;
 
+	wait_for_initramfs();
 	for (i = 0; i < ARRAY_SIZE(fw_path); i++) {
 		size_t file_size = 0;
 		size_t *file_size_ptr = NULL;
@@ -735,7 +801,7 @@ _request_firmware_prepare(struct firmware **firmware_p, const char *name,
 		return -ENOMEM;
 	}
 
-	if (fw_get_builtin_firmware(firmware, name, dbuf, size)) {
+	if (firmware_request_builtin_buf(firmware, name, dbuf, size)) {
 		dev_dbg(device, "using built-in %s\n", name);
 		return 0; /* assigned */
 	}
@@ -829,7 +895,12 @@ _request_firmware(const struct firmware **firmware_p, const char *name,
 	if (!(opt_flags & FW_OPT_PARTIAL))
 		nondirect = true;
 
-#ifdef CONFIG_FW_LOADER_COMPRESS
+#ifdef CONFIG_FW_LOADER_COMPRESS_ZSTD
+	if (ret == -ENOENT && nondirect)
+		ret = fw_get_filesystem_firmware(device, fw->priv, ".zst",
+						 fw_decompress_zstd);
+#endif
+#ifdef CONFIG_FW_LOADER_COMPRESS_XZ
 	if (ret == -ENOENT && nondirect)
 		ret = fw_get_filesystem_firmware(device, fw->priv, ".xz",
 						 fw_decompress_xz);
@@ -1067,7 +1138,7 @@ EXPORT_SYMBOL(request_partial_firmware_into_buf);
 void release_firmware(const struct firmware *fw)
 {
 	if (fw) {
-		if (!fw_is_builtin_firmware(fw))
+		if (!firmware_is_builtin(fw))
 			firmware_free_data(fw);
 		kfree(fw);
 	}
@@ -1231,7 +1302,7 @@ static int uncache_firmware(const char *fw_name)
 
 	pr_debug("%s: %s\n", __func__, fw_name);
 
-	if (fw_get_builtin_firmware(&fw, fw_name, NULL, 0))
+	if (firmware_request_builtin(&fw, fw_name))
 		return 0;
 
 	fw_priv = lookup_fw_priv(fw_name);

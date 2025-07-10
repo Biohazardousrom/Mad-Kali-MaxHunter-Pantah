@@ -66,6 +66,7 @@ static int smp_spin_table_cpu_init(unsigned int cpu)
 static int smp_spin_table_cpu_prepare(unsigned int cpu)
 {
 	__le64 __iomem *release_addr;
+	phys_addr_t pa_holding_pen = __pa_symbol(secondary_holding_pen);
 
 	if (!cpu_release_addr[cpu])
 		return -ENODEV;
@@ -88,7 +89,7 @@ static int smp_spin_table_cpu_prepare(unsigned int cpu)
 	 * boot-loader's endianness before jumping. This is mandated by
 	 * the boot protocol.
 	 */
-	writeq_relaxed(__pa_function(secondary_holding_pen), release_addr);
+	writeq_relaxed(pa_holding_pen, release_addr);
 	dcache_clean_inval_poc((__force unsigned long)release_addr,
 			    (__force unsigned long)release_addr +
 				    sizeof(*release_addr));

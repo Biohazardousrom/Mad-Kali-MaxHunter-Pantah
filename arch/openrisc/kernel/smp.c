@@ -16,6 +16,7 @@
 #include <linux/sched.h>
 #include <linux/sched/mm.h>
 #include <linux/irq.h>
+#include <linux/of.h>
 #include <asm/cpuinfo.h>
 #include <asm/mmu_context.h>
 #include <asm/tlbflush.h>
@@ -60,22 +61,28 @@ void __init smp_prepare_boot_cpu(void)
 
 void __init smp_init_cpus(void)
 {
-	int i;
+	struct device_node *cpu;
+	u32 cpu_id;
 
-	for (i = 0; i < NR_CPUS; i++)
-		set_cpu_possible(i, true);
+	for_each_of_cpu_node(cpu) {
+		cpu_id = of_get_cpu_hwid(cpu, 0);
+		if (cpu_id < NR_CPUS)
+			set_cpu_possible(cpu_id, true);
+	}
 }
 
 void __init smp_prepare_cpus(unsigned int max_cpus)
 {
-	int i;
+	unsigned int cpu;
 
 	/*
 	 * Initialise the present map, which describes the set of CPUs
 	 * actually populated at the present time.
 	 */
-	for (i = 0; i < max_cpus; i++)
-		set_cpu_present(i, true);
+	for_each_possible_cpu(cpu) {
+		if (cpu < max_cpus)
+			set_cpu_present(cpu, true);
+	}
 }
 
 void __init smp_cpus_done(unsigned int max_cpus)
@@ -188,12 +195,6 @@ static void stop_this_cpu(void *dummy)
 void smp_send_stop(void)
 {
 	smp_call_function(stop_this_cpu, NULL, 0);
-}
-
-/* not supported, yet */
-int setup_profiling_timer(unsigned int multiplier)
-{
-	return -EINVAL;
 }
 
 void __init set_smp_cross_call(void (*fn)(const struct cpumask *, unsigned int))

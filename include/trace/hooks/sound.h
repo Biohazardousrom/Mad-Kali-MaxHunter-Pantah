@@ -6,7 +6,6 @@
 #if !defined(_TRACE_HOOK_SOUND_H) || defined(TRACE_HEADER_MULTI_READ)
 #define _TRACE_HOOK_SOUND_H
 #include <trace/hooks/vendor_hooks.h>
-#include <linux/usb.h>
 
 DECLARE_HOOK(android_vh_sound_usb_support_cpu_suspend,
 	TP_PROTO(struct usb_device *udev,

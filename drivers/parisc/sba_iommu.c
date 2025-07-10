@@ -28,6 +28,12 @@
 #include <linux/dma-map-ops.h>
 #include <linux/scatterlist.h>
 #include <linux/iommu-helper.h>
+/*
+ * The semantics of 64 register access on 32bit systems can't be guaranteed
+ * by the C standard, we hope the _lo_hi() macros defining readq and writeq
+ * here will behave as expected.
+ */
+#include <linux/io-64-nonatomic-lo-hi.h>
 
 #include <asm/byteorder.h>
 #include <asm/io.h>
@@ -947,7 +953,7 @@ sba_map_sg(struct device *dev, struct scatterlist *sglist, int nents,
 
 	ioc = GET_IOC(dev);
 	if (!ioc)
-		return 0;
+		return -EINVAL;
 
 	/* Fast path single entry scatterlists. */
 	if (nents == 1) {

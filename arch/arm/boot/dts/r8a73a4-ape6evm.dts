@@ -199,6 +199,7 @@
 		reg-io-width = <4>;
 		smsc,irq-active-high;
 		smsc,irq-push-pull;
+		reset-gpios = <&pfc 270 GPIO_ACTIVE_LOW>;
 		vdd33a-supply = <&ape6evm_fixed_3v3>;
 		vddvario-supply = <&ape6evm_fixed_1v8>;
 	};
@@ -206,6 +207,18 @@
 
 &cmt1 {
 	status = "okay";
+};
+
+&extal1_clk {
+	clock-frequency = <26000000>;
+};
+
+&extal2_clk {
+	clock-frequency = <48000000>;
+};
+
+&extalr_clk {
+	clock-frequency = <32768>;
 };
 
 &pfc {

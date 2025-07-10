@@ -69,13 +69,19 @@ int adf_dev_init(struct adf_accel_dev *accel_dev)
 		return -EFAULT;
 	}
 
-	if (!test_bit(ADF_STATUS_CONFIGURED, &accel_dev->status)) {
+	if (!test_bit(ADF_STATUS_CONFIGURED, &accel_dev->status) &&
+	    !accel_dev->is_vf) {
 		dev_err(&GET_DEV(accel_dev), "Device not configured\n");
 		return -EFAULT;
 	}
 
 	if (adf_init_etr_data(accel_dev)) {
 		dev_err(&GET_DEV(accel_dev), "Failed initialize etr\n");
+		return -EFAULT;
+	}
+
+	if (hw_data->init_device && hw_data->init_device(accel_dev)) {
+		dev_err(&GET_DEV(accel_dev), "Failed to initialize device\n");
 		return -EFAULT;
 	}
 
@@ -88,8 +94,6 @@ int adf_dev_init(struct adf_accel_dev *accel_dev)
 		dev_err(&GET_DEV(accel_dev), "Failed initialize hw arbiter\n");
 		return -EFAULT;
 	}
-
-	hw_data->enable_ints(accel_dev);
 
 	if (adf_ae_init(accel_dev)) {
 		dev_err(&GET_DEV(accel_dev),
@@ -111,6 +115,19 @@ int adf_dev_init(struct adf_accel_dev *accel_dev)
 	}
 	set_bit(ADF_STATUS_IRQ_ALLOCATED, &accel_dev->status);
 
+	hw_data->enable_ints(accel_dev);
+	hw_data->enable_error_correction(accel_dev);
+
+	ret = hw_data->pfvf_ops.enable_comms(accel_dev);
+	if (ret)
+		return ret;
+
+	if (!test_bit(ADF_STATUS_CONFIGURED, &accel_dev->status) &&
+	    accel_dev->is_vf) {
+		if (qat_crypto_vf_dev_config(accel_dev))
+			return -EFAULT;
+	}
+
 	/*
 	 * Subservice initialisation is divided into two stages: init and start.
 	 * This is to facilitate any ordering dependencies between services
@@ -127,10 +144,7 @@ int adf_dev_init(struct adf_accel_dev *accel_dev)
 		set_bit(accel_dev->accel_id, service->init_status);
 	}
 
-	hw_data->enable_error_correction(accel_dev);
-	ret = hw_data->enable_vf2pf_comms(accel_dev);
-
-	return ret;
+	return 0;
 }
 EXPORT_SYMBOL_GPL(adf_dev_init);
 
@@ -163,6 +177,16 @@ int adf_dev_start(struct adf_accel_dev *accel_dev)
 		return -EFAULT;
 	}
 
+	/* Set ssm watch dog timer */
+	if (hw_data->set_ssm_wdtimer)
+		hw_data->set_ssm_wdtimer(accel_dev);
+
+	/* Enable Power Management */
+	if (hw_data->enable_pm && hw_data->enable_pm(accel_dev)) {
+		dev_err(&GET_DEV(accel_dev), "Failed to configure Power Management\n");
+		return -EFAULT;
+	}
+
 	list_for_each(list_itr, &service_table) {
 		service = list_entry(list_itr, struct service_hndl, list);
 		if (service->event_hld(accel_dev, ADF_EVENT_START)) {
@@ -185,6 +209,8 @@ int adf_dev_start(struct adf_accel_dev *accel_dev)
 		clear_bit(ADF_STATUS_STARTED, &accel_dev->status);
 		return -EFAULT;
 	}
+	set_bit(ADF_STATUS_CRYPTO_ALGS_REGISTERED, &accel_dev->status);
+
 	return 0;
 }
 EXPORT_SYMBOL_GPL(adf_dev_start);
@@ -213,10 +239,12 @@ void adf_dev_stop(struct adf_accel_dev *accel_dev)
 	clear_bit(ADF_STATUS_STARTING, &accel_dev->status);
 	clear_bit(ADF_STATUS_STARTED, &accel_dev->status);
 
-	if (!list_empty(&accel_dev->crypto_list)) {
+	if (!list_empty(&accel_dev->crypto_list) &&
+	    test_bit(ADF_STATUS_CRYPTO_ALGS_REGISTERED, &accel_dev->status)) {
 		qat_algs_unregister();
 		qat_asym_algs_unregister();
 	}
+	clear_bit(ADF_STATUS_CRYPTO_ALGS_REGISTERED, &accel_dev->status);
 
 	list_for_each(list_itr, &service_table) {
 		service = list_entry(list_itr, struct service_hndl, list);
@@ -339,3 +367,93 @@ int adf_dev_restarted_notify(struct adf_accel_dev *accel_dev)
 	}
 	return 0;
 }
+
+int adf_dev_shutdown_cache_cfg(struct adf_accel_dev *accel_dev)
+{
+	char services[ADF_CFG_MAX_VAL_LEN_IN_BYTES] = {0};
+	int ret;
+
+	ret = adf_cfg_get_param_value(accel_dev, ADF_GENERAL_SEC,
+				      ADF_SERVICES_ENABLED, services);
+
+	adf_dev_stop(accel_dev);
+	adf_dev_shutdown(accel_dev);
+
+	if (!ret) {
+		ret = adf_cfg_section_add(accel_dev, ADF_GENERAL_SEC);
+		if (ret)
+			return ret;
+
+		ret = adf_cfg_add_key_value_param(accel_dev, ADF_GENERAL_SEC,
+						  ADF_SERVICES_ENABLED,
+						  services, ADF_STR);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+int adf_dev_down(struct adf_accel_dev *accel_dev, bool reconfig)
+{
+	int ret = 0;
+
+	if (!accel_dev)
+		return -EINVAL;
+
+	mutex_lock(&accel_dev->state_lock);
+
+	if (!adf_dev_started(accel_dev)) {
+		dev_info(&GET_DEV(accel_dev), "Device qat_dev%d already down\n",
+			 accel_dev->accel_id);
+		ret = -EINVAL;
+		goto out;
+	}
+
+	if (reconfig) {
+		ret = adf_dev_shutdown_cache_cfg(accel_dev);
+		goto out;
+	}
+
+	adf_dev_stop(accel_dev);
+	adf_dev_shutdown(accel_dev);
+
+out:
+	mutex_unlock(&accel_dev->state_lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(adf_dev_down);
+
+int adf_dev_up(struct adf_accel_dev *accel_dev, bool config)
+{
+	int ret = 0;
+
+	if (!accel_dev)
+		return -EINVAL;
+
+	mutex_lock(&accel_dev->state_lock);
+
+	if (adf_dev_started(accel_dev)) {
+		dev_info(&GET_DEV(accel_dev), "Device qat_dev%d already up\n",
+			 accel_dev->accel_id);
+		ret = -EALREADY;
+		goto out;
+	}
+
+	if (config && GET_HW_DATA(accel_dev)->dev_config) {
+		ret = GET_HW_DATA(accel_dev)->dev_config(accel_dev);
+		if (unlikely(ret))
+			goto out;
+	}
+
+	ret = adf_dev_init(accel_dev);
+	if (unlikely(ret))
+		goto out;
+
+	ret = adf_dev_start(accel_dev);
+
+out:
+	mutex_unlock(&accel_dev->state_lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(adf_dev_up);

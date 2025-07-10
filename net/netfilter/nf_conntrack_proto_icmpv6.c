@@ -126,8 +126,7 @@ static void icmpv6_error_log(const struct sk_buff *skb,
 			     const struct nf_hook_state *state,
 			     const char *msg)
 {
-	nf_l4proto_log_invalid(skb, state->net, state->pf,
-			       IPPROTO_ICMPV6, "%s", msg);
+	nf_l4proto_log_invalid(skb, state, IPPROTO_ICMPV6, "%s", msg);
 }
 
 static noinline_for_stack int

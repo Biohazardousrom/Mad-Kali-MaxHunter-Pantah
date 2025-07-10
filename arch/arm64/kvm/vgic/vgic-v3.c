@@ -538,14 +538,13 @@ int vgic_v3_map_resources(struct kvm *kvm)
 {
 	struct vgic_dist *dist = &kvm->arch.vgic;
 	struct kvm_vcpu *vcpu;
-	int ret = 0;
-	int c;
+	unsigned long c;
 
 	kvm_for_each_vcpu(c, vcpu, kvm) {
 		struct vgic_cpu *vgic_cpu = &vcpu->arch.vgic_cpu;
 
 		if (IS_VGIC_ADDR_UNDEF(vgic_cpu->rd_iodev.base_addr)) {
-			kvm_debug("vcpu %d redistributor base not set\n", c);
+			kvm_debug("vcpu %ld redistributor base not set\n", c);
 			return -ENXIO;
 		}
 	}
@@ -566,12 +565,6 @@ int vgic_v3_map_resources(struct kvm *kvm)
 	 */
 	if (!vgic_initialized(kvm)) {
 		return -EBUSY;
-	}
-
-	ret = vgic_register_dist_iodev(kvm, dist->vgic_dist_base, VGIC_V3);
-	if (ret) {
-		kvm_err("Unable to register VGICv3 dist MMIO regions\n");
-		return ret;
 	}
 
 	if (kvm_vgic_global_state.has_gicv4_1)
@@ -609,6 +602,10 @@ early_param("kvm-arm.vgic_v4_enable", early_gicv4_enable);
 static const struct midr_range broken_seis[] = {
 	MIDR_ALL_VERSIONS(MIDR_APPLE_M1_ICESTORM),
 	MIDR_ALL_VERSIONS(MIDR_APPLE_M1_FIRESTORM),
+	MIDR_ALL_VERSIONS(MIDR_APPLE_M1_ICESTORM_PRO),
+	MIDR_ALL_VERSIONS(MIDR_APPLE_M1_FIRESTORM_PRO),
+	MIDR_ALL_VERSIONS(MIDR_APPLE_M1_ICESTORM_MAX),
+	MIDR_ALL_VERSIONS(MIDR_APPLE_M1_FIRESTORM_MAX),
 	{},
 };
 
@@ -730,7 +727,7 @@ void vgic_v3_put(struct kvm_vcpu *vcpu, bool blocking)
 {
 	struct vgic_v3_cpu_if *cpu_if = &vcpu->arch.vgic_cpu.vgic_v3;
 
-	WARN_ON(vgic_v4_put(vcpu, blocking));
+	WARN_ON(vgic_v4_put(vcpu));
 
 	if (likely(!is_protected_kvm_enabled()))
 		kvm_call_hyp(__vgic_v3_save_vmcr_aprs, cpu_if);

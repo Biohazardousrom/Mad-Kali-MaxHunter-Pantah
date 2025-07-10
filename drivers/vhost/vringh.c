@@ -75,6 +75,34 @@ static inline int __vringh_get_head(const struct vringh *vrh,
 	return head;
 }
 
+/**
+ * vringh_kiov_advance - skip bytes from vring_kiov
+ * @iov: an iov passed to vringh_getdesc_*() (updated as we consume)
+ * @len: the maximum length to advance
+ */
+void vringh_kiov_advance(struct vringh_kiov *iov, size_t len)
+{
+	while (len && iov->i < iov->used) {
+		size_t partlen = min(iov->iov[iov->i].iov_len, len);
+
+		iov->consumed += partlen;
+		iov->iov[iov->i].iov_len -= partlen;
+		iov->iov[iov->i].iov_base += partlen;
+
+		if (!iov->iov[iov->i].iov_len) {
+			/* Fix up old iov element then increment. */
+			iov->iov[iov->i].iov_len = iov->consumed;
+			iov->iov[iov->i].iov_base -= iov->consumed;
+
+			iov->consumed = 0;
+			iov->i++;
+		}
+
+		len -= partlen;
+	}
+}
+EXPORT_SYMBOL(vringh_kiov_advance);
+
 /* Copy some bytes to/from the iovec.  Returns num copied. */
 static inline ssize_t vringh_iov_xfer(struct vringh *vrh,
 				      struct vringh_kiov *iov,
@@ -104,7 +132,6 @@ static inline ssize_t vringh_iov_xfer(struct vringh *vrh,
 			iov->iov[iov->i].iov_len = iov->consumed;
 			iov->iov[iov->i].iov_base -= iov->consumed;
 
-			
 			iov->consumed = 0;
 			iov->i++;
 		}
@@ -198,7 +225,8 @@ static int resize_iovec(struct vringh_kiov *iov, gfp_t gfp)
 
 	flag = (iov->max_num & VRINGH_IOV_ALLOCATED);
 	if (flag)
-		new = krealloc(iov->iov, new_num * sizeof(struct iovec), gfp);
+		new = krealloc_array(iov->iov, new_num,
+				     sizeof(struct iovec), gfp);
 	else {
 		new = kmalloc_array(new_num, sizeof(struct iovec), gfp);
 		if (new) {
@@ -289,9 +317,9 @@ __vringh_iov(struct vringh *vrh, u16 i,
 		return -EINVAL;
 
 	if (riov)
-		riov->i = riov->used = 0;
+		riov->i = riov->used = riov->consumed = 0;
 	if (wiov)
-		wiov->i = wiov->used = 0;
+		wiov->i = wiov->used = wiov->consumed = 0;
 
 	for (;;) {
 		void *addr;
@@ -667,7 +695,10 @@ EXPORT_SYMBOL(vringh_init_user);
  * *head will be vrh->vring.num.  You may be able to ignore an invalid
  * descriptor, but there's not much you can do with an invalid ring.
  *
- * Note that you may need to clean up riov and wiov, even on error!
+ * Note that you can reuse riov and wiov with subsequent calls. Content is
+ * overwritten and memory reallocated if more space is needed.
+ * When you don't have to use riov and wiov anymore, you should clean up them
+ * calling vringh_iov_cleanup() to release the memory, even on error!
  */
 int vringh_getdesc_user(struct vringh *vrh,
 			struct vringh_iov *riov,
@@ -937,7 +968,10 @@ EXPORT_SYMBOL(vringh_init_kern);
  * *head will be vrh->vring.num.  You may be able to ignore an invalid
  * descriptor, but there's not much you can do with an invalid ring.
  *
- * Note that you may need to clean up riov and wiov, even on error!
+ * Note that you can reuse riov and wiov with subsequent calls. Content is
+ * overwritten and memory reallocated if more space is needed.
+ * When you don't have to use riov and wiov anymore, you should clean up them
+ * calling vringh_kiov_cleanup() to release the memory, even on error!
  */
 int vringh_getdesc_kern(struct vringh *vrh,
 			struct vringh_kiov *riov,
@@ -1071,13 +1105,16 @@ EXPORT_SYMBOL(vringh_need_notify_kern);
 #if IS_REACHABLE(CONFIG_VHOST_IOTLB)
 
 static int iotlb_translate(const struct vringh *vrh,
-			   u64 addr, u64 len, struct bio_vec iov[],
+			   u64 addr, u64 len, u64 *translated,
+			   struct bio_vec iov[],
 			   int iov_size, u32 perm)
 {
 	struct vhost_iotlb_map *map;
 	struct vhost_iotlb *iotlb = vrh->iotlb;
 	int ret = 0;
 	u64 s = 0, last = addr + len - 1;
+
+	spin_lock(vrh->iotlb_lock);
 
 	while (len > s) {
 		u64 size, pa, pfn;
@@ -1107,43 +1144,78 @@ static int iotlb_translate(const struct vringh *vrh,
 		++ret;
 	}
 
+	spin_unlock(vrh->iotlb_lock);
+
+	if (translated)
+		*translated = min(len, s);
+
 	return ret;
 }
 
 static inline int copy_from_iotlb(const struct vringh *vrh, void *dst,
 				  void *src, size_t len)
 {
-	struct iov_iter iter;
-	struct bio_vec iov[16];
-	int ret;
+	u64 total_translated = 0;
 
-	ret = iotlb_translate(vrh, (u64)(uintptr_t)src,
-			      len, iov, 16, VHOST_MAP_RO);
-	if (ret < 0)
-		return ret;
+	while (total_translated < len) {
+		struct bio_vec iov[16];
+		struct iov_iter iter;
+		u64 translated;
+		int ret;
 
-	iov_iter_bvec(&iter, READ, iov, ret, len);
+		ret = iotlb_translate(vrh, (u64)(uintptr_t)src,
+				      len - total_translated, &translated,
+				      iov, ARRAY_SIZE(iov), VHOST_MAP_RO);
+		if (ret == -ENOBUFS)
+			ret = ARRAY_SIZE(iov);
+		else if (ret < 0)
+			return ret;
 
-	ret = copy_from_iter(dst, len, &iter);
+		iov_iter_bvec(&iter, ITER_SOURCE, iov, ret, translated);
 
-	return ret;
+		ret = copy_from_iter(dst, translated, &iter);
+		if (ret < 0)
+			return ret;
+
+		src += translated;
+		dst += translated;
+		total_translated += translated;
+	}
+
+	return total_translated;
 }
 
 static inline int copy_to_iotlb(const struct vringh *vrh, void *dst,
 				void *src, size_t len)
 {
-	struct iov_iter iter;
-	struct bio_vec iov[16];
-	int ret;
+	u64 total_translated = 0;
 
-	ret = iotlb_translate(vrh, (u64)(uintptr_t)dst,
-			      len, iov, 16, VHOST_MAP_WO);
-	if (ret < 0)
-		return ret;
+	while (total_translated < len) {
+		struct bio_vec iov[16];
+		struct iov_iter iter;
+		u64 translated;
+		int ret;
 
-	iov_iter_bvec(&iter, WRITE, iov, ret, len);
+		ret = iotlb_translate(vrh, (u64)(uintptr_t)dst,
+				      len - total_translated, &translated,
+				      iov, ARRAY_SIZE(iov), VHOST_MAP_WO);
+		if (ret == -ENOBUFS)
+			ret = ARRAY_SIZE(iov);
+		else if (ret < 0)
+			return ret;
 
-	return copy_to_iter(src, len, &iter);
+		iov_iter_bvec(&iter, ITER_DEST, iov, ret, translated);
+
+		ret = copy_to_iter(src, translated, &iter);
+		if (ret < 0)
+			return ret;
+
+		src += translated;
+		dst += translated;
+		total_translated += translated;
+	}
+
+	return total_translated;
 }
 
 static inline int getu16_iotlb(const struct vringh *vrh,
@@ -1154,7 +1226,7 @@ static inline int getu16_iotlb(const struct vringh *vrh,
 	int ret;
 
 	/* Atomic read is needed for getu16 */
-	ret = iotlb_translate(vrh, (u64)(uintptr_t)p, sizeof(*p),
+	ret = iotlb_translate(vrh, (u64)(uintptr_t)p, sizeof(*p), NULL,
 			      &iov, 1, VHOST_MAP_RO);
 	if (ret < 0)
 		return ret;
@@ -1175,7 +1247,7 @@ static inline int putu16_iotlb(const struct vringh *vrh,
 	int ret;
 
 	/* Atomic write is needed for putu16 */
-	ret = iotlb_translate(vrh, (u64)(uintptr_t)p, sizeof(*p),
+	ret = iotlb_translate(vrh, (u64)(uintptr_t)p, sizeof(*p), NULL,
 			      &iov, 1, VHOST_MAP_WO);
 	if (ret < 0)
 		return ret;
@@ -1266,10 +1338,13 @@ EXPORT_SYMBOL(vringh_init_iotlb);
  * vringh_set_iotlb - initialize a vringh for a ring with IOTLB.
  * @vrh: the vring
  * @iotlb: iotlb associated with this vring
+ * @iotlb_lock: spinlock to synchronize the iotlb accesses
  */
-void vringh_set_iotlb(struct vringh *vrh, struct vhost_iotlb *iotlb)
+void vringh_set_iotlb(struct vringh *vrh, struct vhost_iotlb *iotlb,
+		      spinlock_t *iotlb_lock)
 {
 	vrh->iotlb = iotlb;
+	vrh->iotlb_lock = iotlb_lock;
 }
 EXPORT_SYMBOL(vringh_set_iotlb);
 
@@ -1289,7 +1364,10 @@ EXPORT_SYMBOL(vringh_set_iotlb);
  * *head will be vrh->vring.num.  You may be able to ignore an invalid
  * descriptor, but there's not much you can do with an invalid ring.
  *
- * Note that you may need to clean up riov and wiov, even on error!
+ * Note that you can reuse riov and wiov with subsequent calls. Content is
+ * overwritten and memory reallocated if more space is needed.
+ * When you don't have to use riov and wiov anymore, you should clean up them
+ * calling vringh_kiov_cleanup() to release the memory, even on error!
  */
 int vringh_getdesc_iotlb(struct vringh *vrh,
 			 struct vringh_kiov *riov,

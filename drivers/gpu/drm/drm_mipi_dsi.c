@@ -25,18 +25,16 @@
  * USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#include <drm/drm_mipi_dsi.h>
-
-#include <linux/debugfs.h>
-#include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/module.h>
 #include <linux/of_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/slab.h>
 
-#include <drm/drm_dsc.h>
+#include <drm/display/drm_dsc.h>
+#include <drm/drm_mipi_dsi.h>
 #include <drm/drm_print.h>
+
 #include <video/mipi_display.h>
 
 /**
@@ -224,7 +222,6 @@ mipi_dsi_device_register_full(struct mipi_dsi_host *host,
 	}
 
 	device_set_node(&dsi->dev, of_fwnode_handle(info->node));
-	dsi->dev.fwnode = of_fwnode_handle(info->node);
 	dsi->channel = info->channel;
 	strlcpy(dsi->name, info->type, sizeof(dsi->name));
 
@@ -248,6 +245,52 @@ void mipi_dsi_device_unregister(struct mipi_dsi_device *dsi)
 	device_unregister(&dsi->dev);
 }
 EXPORT_SYMBOL(mipi_dsi_device_unregister);
+
+static void devm_mipi_dsi_device_unregister(void *arg)
+{
+	struct mipi_dsi_device *dsi = arg;
+
+	mipi_dsi_device_unregister(dsi);
+}
+
+/**
+ * devm_mipi_dsi_device_register_full - create a managed MIPI DSI device
+ * @dev: device to tie the MIPI-DSI device lifetime to
+ * @host: DSI host to which this device is connected
+ * @info: pointer to template containing DSI device information
+ *
+ * Create a MIPI DSI device by using the device information provided by
+ * mipi_dsi_device_info template
+ *
+ * This is the managed version of mipi_dsi_device_register_full() which
+ * automatically calls mipi_dsi_device_unregister() when @dev is
+ * unbound.
+ *
+ * Returns:
+ * A pointer to the newly created MIPI DSI device, or, a pointer encoded
+ * with an error
+ */
+struct mipi_dsi_device *
+devm_mipi_dsi_device_register_full(struct device *dev,
+				   struct mipi_dsi_host *host,
+				   const struct mipi_dsi_device_info *info)
+{
+	struct mipi_dsi_device *dsi;
+	int ret;
+
+	dsi = mipi_dsi_device_register_full(host, info);
+	if (IS_ERR(dsi))
+		return dsi;
+
+	ret = devm_add_action_or_reset(dev,
+				       devm_mipi_dsi_device_unregister,
+				       dsi);
+	if (ret)
+		return ERR_PTR(ret);
+
+	return dsi;
+}
+EXPORT_SYMBOL_GPL(devm_mipi_dsi_device_register_full);
 
 static DEFINE_MUTEX(host_lock);
 static LIST_HEAD(host_list);
@@ -349,6 +392,41 @@ int mipi_dsi_detach(struct mipi_dsi_device *dsi)
 }
 EXPORT_SYMBOL(mipi_dsi_detach);
 
+static void devm_mipi_dsi_detach(void *arg)
+{
+	struct mipi_dsi_device *dsi = arg;
+
+	mipi_dsi_detach(dsi);
+}
+
+/**
+ * devm_mipi_dsi_attach - Attach a MIPI-DSI device to its DSI Host
+ * @dev: device to tie the MIPI-DSI device attachment lifetime to
+ * @dsi: DSI peripheral
+ *
+ * This is the managed version of mipi_dsi_attach() which automatically
+ * calls mipi_dsi_detach() when @dev is unbound.
+ *
+ * Returns:
+ * 0 on success, a negative error code on failure.
+ */
+int devm_mipi_dsi_attach(struct device *dev,
+			 struct mipi_dsi_device *dsi)
+{
+	int ret;
+
+	ret = mipi_dsi_attach(dsi);
+	if (ret)
+		return ret;
+
+	ret = devm_add_action_or_reset(dev, devm_mipi_dsi_detach, dsi);
+	if (ret)
+		return ret;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(devm_mipi_dsi_attach);
+
 static ssize_t mipi_dsi_device_transfer(struct mipi_dsi_device *dsi,
 					struct mipi_dsi_msg *msg)
 {
@@ -359,7 +437,6 @@ static ssize_t mipi_dsi_device_transfer(struct mipi_dsi_device *dsi,
 
 	if (dsi->mode_flags & MIPI_DSI_MODE_LPM)
 		msg->flags |= MIPI_DSI_MSG_USE_LPM;
-	msg->flags |= MIPI_DSI_MSG_LASTCOMMAND;
 
 	return ops->transfer(dsi->host, msg);
 }
@@ -692,19 +769,6 @@ ssize_t mipi_dsi_generic_read(struct mipi_dsi_device *dsi, const void *params,
 }
 EXPORT_SYMBOL(mipi_dsi_generic_read);
 
-static ssize_t mipi_dsi_dcs_transfer(struct mipi_dsi_device *dsi, u8 type,
-				     const void *data, size_t len)
-{
-	struct mipi_dsi_msg msg = {
-		.channel = dsi->channel,
-		.tx_buf = data,
-		.tx_len = len,
-		.type = type,
-	};
-
-	return mipi_dsi_device_transfer(dsi, &msg);
-}
-
 /**
  * mipi_dsi_dcs_write_buffer() - transmit a DCS command with payload
  * @dsi: DSI peripheral device
@@ -720,26 +784,30 @@ static ssize_t mipi_dsi_dcs_transfer(struct mipi_dsi_device *dsi, u8 type,
 ssize_t mipi_dsi_dcs_write_buffer(struct mipi_dsi_device *dsi,
 				  const void *data, size_t len)
 {
-	u8 type;
+	struct mipi_dsi_msg msg = {
+		.channel = dsi->channel,
+		.tx_buf = data,
+		.tx_len = len
+	};
 
 	switch (len) {
 	case 0:
 		return -EINVAL;
 
 	case 1:
-		type = MIPI_DSI_DCS_SHORT_WRITE;
+		msg.type = MIPI_DSI_DCS_SHORT_WRITE;
 		break;
 
 	case 2:
-		type = MIPI_DSI_DCS_SHORT_WRITE_PARAM;
+		msg.type = MIPI_DSI_DCS_SHORT_WRITE_PARAM;
 		break;
 
 	default:
-		type = MIPI_DSI_DCS_LONG_WRITE;
+		msg.type = MIPI_DSI_DCS_LONG_WRITE;
 		break;
 	}
 
-	return mipi_dsi_dcs_transfer(dsi, type, data, len);
+	return mipi_dsi_device_transfer(dsi, &msg);
 }
 EXPORT_SYMBOL(mipi_dsi_dcs_write_buffer);
 
@@ -1156,150 +1224,6 @@ int mipi_dsi_dcs_get_display_brightness(struct mipi_dsi_device *dsi,
 }
 EXPORT_SYMBOL(mipi_dsi_dcs_get_display_brightness);
 
-#ifdef CONFIG_DRM_DEBUGFS_PANEL
-static int mipi_dsi_name_show(struct seq_file *m, void *data)
-{
-	struct mipi_dsi_device *dsi = m->private;
-
-	seq_puts(m, dsi->name);
-	seq_putc(m, '\n');
-
-	return 0;
-}
-DEFINE_SHOW_ATTRIBUTE(mipi_dsi_name);
-
-static ssize_t parse_byte_buf(u8 *out, size_t len, char *src)
-{
-	const char *skip = "\n ";
-	size_t i = 0;
-	int rc = 0;
-	char *s;
-
-	while (src && !rc && i < len) {
-		s = strsep(&src, skip);
-		if (*s != '\0') {
-			rc = kstrtou8(s, 16, out + i);
-			i++;
-		}
-	}
-
-	return rc ? : i;
-}
-
-struct mipi_dsi_reg_data {
-	struct mipi_dsi_device *dsi;
-	u8 address;
-	u8 type;
-	size_t count;
-};
-
-ssize_t mipi_dsi_payload_write(struct file *file,
-			       const char __user *user_buf,
-			       size_t count, loff_t *ppos)
-{
-	struct seq_file *m = file->private_data;
-	struct mipi_dsi_reg_data *reg_data = m->private;
-	char *buf;
-	char *payload;
-	size_t len;
-	int ret;
-
-	buf = memdup_user_nul(user_buf, count);
-	if (IS_ERR(buf))
-		return PTR_ERR(buf);
-
-	/* calculate length for worst case (1 digit per byte + whitespace) */
-	len = (count + 1) / 2;
-	payload = kmalloc(len, GFP_KERNEL);
-	if (!payload) {
-		kfree(buf);
-		return -ENOMEM;
-	}
-
-	ret = parse_byte_buf(payload, len, buf);
-	if (ret <= 0) {
-		ret = -EINVAL;
-	} else if (reg_data->type) {
-		ret = mipi_dsi_dcs_transfer(reg_data->dsi, reg_data->type,
-					    payload, ret);
-	} else {
-		ret = mipi_dsi_dcs_write_buffer(reg_data->dsi, payload, ret);
-	}
-
-	kfree(buf);
-	kfree(payload);
-
-	return ret ? : count;
-}
-
-static int mipi_dsi_payload_show(struct seq_file *m, void *data)
-{
-	struct mipi_dsi_reg_data *reg_data = m->private;
-	char *buf;
-	ssize_t rc;
-
-	if (!reg_data->count)
-		return -EINVAL;
-
-	buf = kmalloc(reg_data->count, GFP_KERNEL);
-	if (!buf)
-		return -ENOMEM;
-
-	rc = mipi_dsi_dcs_read(reg_data->dsi, reg_data->address, buf,
-			       reg_data->count);
-	if (rc > 0) {
-		seq_hex_dump(m, "", DUMP_PREFIX_NONE, 16, 1, buf, rc, false);
-		rc = 0;
-	} else if (rc == 0) {
-		pr_debug("no response back\n");
-	}
-	kfree(buf);
-
-	return 0;
-}
-
-static int mipi_dsi_payload_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, mipi_dsi_payload_show, inode->i_private);
-}
-
-static const struct file_operations mipi_dsi_payload_fops = {
-	.owner		= THIS_MODULE,
-	.open		= mipi_dsi_payload_open,
-	.write		= mipi_dsi_payload_write,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= single_release,
-};
-
-int mipi_dsi_debugfs_add(struct mipi_dsi_device *dsi,
-			 struct dentry *parent)
-{
-	struct dentry *reg_root;
-	struct mipi_dsi_reg_data *reg_data;
-
-	reg_root = debugfs_create_dir("reg", parent);
-	if (!reg_root)
-		return -EFAULT;
-
-	reg_data = devm_kzalloc(&dsi->dev, sizeof(*reg_data), GFP_KERNEL);
-	if (!reg_data)
-		return -ENOMEM;
-
-	reg_data->dsi = dsi;
-
-	debugfs_create_u8("address", 0600, reg_root, &reg_data->address);
-	debugfs_create_u8("type", 0600, reg_root, &reg_data->type);
-	debugfs_create_size_t("count", 0600, reg_root, &reg_data->count);
-	debugfs_create_file("payload", 0600, reg_root, reg_data,
-			    &mipi_dsi_payload_fops);
-
-	debugfs_create_file("name", 0600, parent, dsi, &mipi_dsi_name_fops);
-
-	return 0;
-}
-#endif
-
 /**
  * mipi_dsi_dcs_set_display_brightness_large() - sets the 16-bit brightness value
  *    of the display
@@ -1365,7 +1289,9 @@ static int mipi_dsi_drv_remove(struct device *dev)
 	struct mipi_dsi_driver *drv = to_mipi_dsi_driver(dev->driver);
 	struct mipi_dsi_device *dsi = to_mipi_dsi_device(dev);
 
-	return drv->remove(dsi);
+	drv->remove(dsi);
+
+	return 0;
 }
 
 static void mipi_dsi_drv_shutdown(struct device *dev)

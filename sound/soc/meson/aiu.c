@@ -42,7 +42,7 @@ static const struct snd_soc_dapm_route aiu_cpu_dapm_routes[] = {
 };
 
 int aiu_of_xlate_dai_name(struct snd_soc_component *component,
-			  struct of_phandle_args *args,
+			  const struct of_phandle_args *args,
 			  const char **dai_name,
 			  unsigned int component_id)
 {
@@ -72,7 +72,7 @@ int aiu_of_xlate_dai_name(struct snd_soc_component *component,
 }
 
 static int aiu_cpu_of_xlate_dai_name(struct snd_soc_component *component,
-				     struct of_phandle_args *args,
+				     const struct of_phandle_args *args,
 				     const char **dai_name)
 {
 	return aiu_of_xlate_dai_name(component, args, dai_name, AIU_CPU);
@@ -103,6 +103,9 @@ static const struct snd_soc_component_driver aiu_cpu_component = {
 	.pointer		= aiu_fifo_pointer,
 	.probe			= aiu_cpu_component_probe,
 	.remove			= aiu_cpu_component_remove,
+#ifdef CONFIG_DEBUG_FS
+	.debugfs_prefix		= "cpu",
+#endif
 };
 
 static struct snd_soc_dai_driver aiu_cpu_dai_drv[] = {

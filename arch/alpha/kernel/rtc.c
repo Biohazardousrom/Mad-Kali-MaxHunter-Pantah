@@ -80,7 +80,7 @@ init_rtc_epoch(void)
 static int
 alpha_rtc_read_time(struct device *dev, struct rtc_time *tm)
 {
-	int ret = mc146818_get_time(tm);
+	int ret = mc146818_get_time(tm, 10);
 
 	if (ret < 0) {
 		dev_err_ratelimited(dev, "unable to read current time\n");
@@ -221,6 +221,6 @@ alpha_rtc_init(void)
 		rtc->ops = &remote_rtc_ops;
 #endif
 
-	return rtc_register_device(rtc);
+	return devm_rtc_register_device(rtc);
 }
 device_initcall(alpha_rtc_init);

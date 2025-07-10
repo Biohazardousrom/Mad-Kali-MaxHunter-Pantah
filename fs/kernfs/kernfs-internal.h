@@ -31,6 +31,24 @@ struct kernfs_iattrs {
 	atomic_t		user_xattr_size;
 };
 
+struct kernfs_root {
+	/* published fields */
+	struct kernfs_node	*kn;
+	unsigned int		flags;	/* KERNFS_ROOT_* flags */
+
+	/* private fields, do not use outside kernfs proper */
+	struct idr		ino_idr;
+	u32			last_id_lowbits;
+	u32			id_highbits;
+	struct kernfs_syscall_ops *syscall_ops;
+
+	/* list of kernfs_super_info of this root, protected by kernfs_rwsem */
+	struct list_head	supers;
+
+	wait_queue_head_t	deactivate_waitq;
+	struct rw_semaphore	kernfs_rwsem;
+};
+
 /* +1 to avoid triggering overflow warning when negating it */
 #define KN_DEACTIVATED_BIAS		(INT_MIN + 1)
 
@@ -48,14 +66,6 @@ static inline struct kernfs_root *kernfs_root(struct kernfs_node *kn)
 	if (kn->parent)
 		kn = kn->parent;
 	return kn->dir.root;
-}
-
-static inline struct rw_semaphore *kernfs_rwsem(struct kernfs_root *root)
-{
-	struct kernfs_root_ext *root_ext;
-
-	root_ext = container_of(root, struct kernfs_root_ext, root);
-	return &root_ext->kernfs_rwsem;
 }
 
 /*
@@ -93,27 +103,18 @@ static inline struct kernfs_node *kernfs_dentry_node(struct dentry *dentry)
 static inline void kernfs_set_rev(struct kernfs_node *parent,
 				  struct dentry *dentry)
 {
-	struct kernfs_node_ext *node_ext;
-
-	node_ext = container_of(parent, struct kernfs_node_ext, node);
-	dentry->d_time = node_ext->rev;
+	dentry->d_time = parent->dir.rev;
 }
 
 static inline void kernfs_inc_rev(struct kernfs_node *parent)
 {
-	struct kernfs_node_ext *node_ext;
-
-	node_ext = container_of(parent, struct kernfs_node_ext, node);
-	node_ext->rev++;
+	parent->dir.rev++;
 }
 
 static inline bool kernfs_dir_changed(struct kernfs_node *parent,
 				      struct dentry *dentry)
 {
-	struct kernfs_node_ext *node_ext;
-
-	node_ext = container_of(parent, struct kernfs_node_ext, node);
-	if (node_ext->rev != dentry->d_time)
+	if (parent->dir.rev != dentry->d_time)
 		return true;
 	return false;
 }
@@ -126,9 +127,12 @@ extern struct kmem_cache *kernfs_node_cache, *kernfs_iattrs_cache;
  */
 extern const struct xattr_handler *kernfs_xattr_handlers[];
 void kernfs_evict_inode(struct inode *inode);
-int kernfs_iop_permission(struct inode *inode, int mask);
-int kernfs_iop_setattr(struct dentry *dentry, struct iattr *iattr);
-int kernfs_iop_getattr(const struct path *path, struct kstat *stat,
+int kernfs_iop_permission(struct user_namespace *mnt_userns,
+			  struct inode *inode, int mask);
+int kernfs_iop_setattr(struct user_namespace *mnt_userns, struct dentry *dentry,
+		       struct iattr *iattr);
+int kernfs_iop_getattr(struct user_namespace *mnt_userns,
+		       const struct path *path, struct kstat *stat,
 		       u32 request_mask, unsigned int query_flags);
 ssize_t kernfs_iop_listxattr(struct dentry *dentry, char *buf, size_t size);
 int __kernfs_setattr(struct kernfs_node *kn, const struct iattr *iattr);
@@ -153,6 +157,7 @@ struct kernfs_node *kernfs_new_node(struct kernfs_node *parent,
  */
 extern const struct file_operations kernfs_file_fops;
 
+bool kernfs_should_drain_open_files(struct kernfs_node *kn);
 void kernfs_drain_open_files(struct kernfs_node *kn);
 
 /*
@@ -160,4 +165,8 @@ void kernfs_drain_open_files(struct kernfs_node *kn);
  */
 extern const struct inode_operations kernfs_symlink_iops;
 
+/*
+ * kernfs locks
+ */
+extern struct kernfs_global_locks *kernfs_locks;
 #endif	/* __KERNFS_INTERNAL_H */

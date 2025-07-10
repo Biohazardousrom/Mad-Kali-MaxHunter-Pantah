@@ -16,7 +16,11 @@
 
 #define sev()		asm volatile("sev" : : : "memory")
 #define wfe()		asm volatile("wfe" : : : "memory")
+#define wfet(val)	asm volatile("msr s0_3_c1_c0_0, %0"	\
+				     : : "r" (val) : "memory")
 #define wfi()		asm volatile("wfi" : : : "memory")
+#define wfit(val)	asm volatile("msr s0_3_c1_c0_1, %0"	\
+				     : : "r" (val) : "memory")
 
 #define isb()		asm volatile("isb" : : : "memory")
 #define dmb(opt)	asm volatile("dmb " #opt : : : "memory")
@@ -26,9 +30,13 @@
 #define __tsb_csync()	asm volatile("hint #18" : : : "memory")
 #define csdb()		asm volatile("hint #20" : : : "memory")
 
-#define spec_bar()	asm volatile(ALTERNATIVE("dsb nsh\nisb\n",		\
-						 SB_BARRIER_INSN"nop\n",	\
-						 ARM64_HAS_SB))
+/*
+ * Data Gathering Hint:
+ * This instruction prevents merging memory accesses with Normal-NC or
+ * Device-GRE attributes before the hint instruction with any memory accesses
+ * appearing after the hint instruction.
+ */
+#define dgh()		asm volatile("hint #6" : : : "memory")
 
 #ifdef CONFIG_ARM64_PSEUDO_NMI
 #define pmr_sync()						\
@@ -42,14 +50,15 @@
 #define pmr_sync()	do {} while (0)
 #endif
 
-#define mb()		dsb(sy)
-#define rmb()		dsb(ld)
-#define wmb()		dsb(st)
+#define __mb()		dsb(sy)
+#define __rmb()		dsb(ld)
+#define __wmb()		dsb(st)
 
-#define dma_mb()	dmb(osh)
-#define dma_rmb()	dmb(oshld)
-#define dma_wmb()	dmb(oshst)
+#define __dma_mb()	dmb(osh)
+#define __dma_rmb()	dmb(oshld)
+#define __dma_wmb()	dmb(oshst)
 
+#define io_stop_wc()	dgh()
 
 #define tsb_csync()								\
 	do {									\
@@ -92,7 +101,7 @@ static inline unsigned long array_index_mask_nospec(unsigned long idx,
  * This insanity brought to you by speculative system register reads,
  * out-of-order memory accesses, sequence locks and Thomas Gleixner.
  *
- * http://lists.infradead.org/pipermail/linux-arm-kernel/2019-February/631195.html
+ * https://lore.kernel.org/r/alpine.DEB.2.21.1902081950260.1662@nanos.tec.linutronix.de/
  */
 #define arch_counter_enforce_ordering(val) do {				\
 	u64 tmp, _val = (val);						\

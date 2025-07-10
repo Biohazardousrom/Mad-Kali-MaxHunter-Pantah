@@ -236,7 +236,7 @@ static struct data_file *handle_mapped_file(struct mount_info *mi,
 	if (!index_file_dentry)
 		return ERR_PTR(-ENOENT);
 	if (IS_ERR(index_file_dentry))
-		return (struct data_file *)index_file_dentry;
+		return ERR_CAST(index_file_dentry);
 	if (!d_really_is_positive(index_file_dentry)) {
 		result = ERR_PTR(-ENOENT);
 		goto out;
@@ -253,7 +253,7 @@ static struct data_file *handle_mapped_file(struct mount_info *mi,
 	revert_creds(old_cred);
 
 	if (IS_ERR(bf)) {
-		result = (struct data_file *)bf;
+		result = ERR_CAST(bf);
 		goto out;
 	}
 
@@ -432,7 +432,7 @@ static ssize_t zstd_decompress_safe(struct mount_info *mi,
 		return result;
 
 	if (!mi->mi_zstd_stream) {
-		unsigned int workspace_size = ZSTD_DStreamWorkspaceBound(
+		unsigned int workspace_size = zstd_dstream_workspace_bound(
 						INCFS_DATA_FILE_BLOCK_SIZE);
 		void *workspace = kvmalloc(workspace_size, GFP_NOFS);
 		ZSTD_DStream *stream;
@@ -442,7 +442,7 @@ static ssize_t zstd_decompress_safe(struct mount_info *mi,
 			goto out;
 		}
 
-		stream = ZSTD_initDStream(INCFS_DATA_FILE_BLOCK_SIZE, workspace,
+		stream = zstd_init_dstream(INCFS_DATA_FILE_BLOCK_SIZE, workspace,
 				  workspace_size);
 		if (!stream) {
 			kvfree(workspace);
@@ -454,7 +454,7 @@ static ssize_t zstd_decompress_safe(struct mount_info *mi,
 		mi->mi_zstd_stream = stream;
 	}
 
-	result = ZSTD_decompressStream(mi->mi_zstd_stream, &outbuf, &inbuf) ?
+	result = zstd_decompress_stream(mi->mi_zstd_stream, &outbuf, &inbuf) ?
 		-EBADMSG : outbuf.pos;
 
 	mod_delayed_work(system_wq, &mi->mi_zstd_cleanup_work,
@@ -661,7 +661,7 @@ static void log_block_read(struct mount_info *mi, incfs_uuid_t *id,
 	++head->current_record_no;
 
 	spin_unlock(&log->rl_lock);
-	queue_delayed_work(system_power_efficient_wq, &log->ml_wakeup_work, msecs_to_jiffies(16));
+	schedule_delayed_work(&log->ml_wakeup_work, msecs_to_jiffies(16));
 }
 
 static int validate_hash_tree(struct backing_file_context *bfc, struct file *f,
@@ -718,6 +718,7 @@ static int validate_hash_tree(struct backing_file_context *bfc, struct file *f,
 
 			memcpy(stored_digest, addr + hash_offset_in_block[lvl],
 			       digest_size);
+
 			kunmap_atomic(addr);
 			put_page(page);
 			continue;
@@ -765,6 +766,7 @@ static int validate_hash_tree(struct backing_file_context *bfc, struct file *f,
 			memcpy(addr, buf, INCFS_DATA_FILE_BLOCK_SIZE);
 			kunmap_atomic(addr);
 			SetPageChecked(page);
+			SetPageUptodate(page);
 			unlock_page(page);
 			put_page(page);
 		}

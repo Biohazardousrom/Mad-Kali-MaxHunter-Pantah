@@ -95,7 +95,7 @@ static unsigned int fq_pie_classify(struct sk_buff *skb, struct Qdisc *sch,
 		return fq_pie_hash(q, skb) + 1;
 
 	*qerr = NET_XMIT_SUCCESS | __NET_XMIT_BYPASS;
-	result = tcf_classify(skb, filter, &res, false);
+	result = tcf_classify(skb, NULL, filter, &res, false);
 	if (result >= 0) {
 #ifdef CONFIG_NET_CLS_ACT
 		switch (result) {
@@ -290,9 +290,6 @@ static int fq_pie_change(struct Qdisc *sch, struct nlattr *opt,
 	unsigned int num_dropped = 0;
 	int err;
 
-	if (!opt)
-		return -EINVAL;
-
 	err = nla_parse_nested(tb, TCA_FQ_PIE_MAX, opt, fq_pie_policy, extack);
 	if (err < 0)
 		return err;
@@ -384,6 +381,7 @@ static void fq_pie_timer(struct timer_list *t)
 	spinlock_t *root_lock; /* to lock qdisc for probability calculations */
 	int max_cnt, i;
 
+	rcu_read_lock();
 	root_lock = qdisc_lock(qdisc_root_sleeping(sch));
 	spin_lock(root_lock);
 
@@ -405,6 +403,7 @@ static void fq_pie_timer(struct timer_list *t)
 	if (tupdate)
 		mod_timer(&q->adapt_timer, jiffies + next);
 	spin_unlock(root_lock);
+	rcu_read_unlock();
 }
 
 static int fq_pie_init(struct Qdisc *sch, struct nlattr *opt,

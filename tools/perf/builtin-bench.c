@@ -89,7 +89,15 @@ static struct bench internals_benchmarks[] = {
 	{ "synthesize", "Benchmark perf event synthesis",	bench_synthesize	},
 	{ "kallsyms-parse", "Benchmark kallsyms parsing",	bench_kallsyms_parse	},
 	{ "inject-build-id", "Benchmark build-id injection",	bench_inject_build_id	},
+	{ "evlist-open-close", "Benchmark evlist open and close",	bench_evlist_open_close	},
 	{ NULL,		NULL,					NULL			}
+};
+
+static struct bench breakpoint_benchmarks[] = {
+	{ "thread", "Benchmark thread start/finish with breakpoints", bench_breakpoint_thread},
+	{ "enable", "Benchmark breakpoint enable/disable", bench_breakpoint_enable},
+	{ "all", "Run all breakpoint benchmarks", NULL},
+	{ NULL,	NULL, NULL },
 };
 
 struct collection {
@@ -110,6 +118,7 @@ static struct collection collections[] = {
 	{"epoll",       "Epoll stressing benchmarks",                   epoll_benchmarks        },
 #endif
 	{ "internals",	"Perf-internals benchmarks",			internals_benchmarks	},
+	{ "breakpoint",	"Breakpoint benchmarks",			breakpoint_benchmarks	},
 	{ "all",	"All benchmarks",				NULL			},
 	{ NULL,		NULL,						NULL			}
 };

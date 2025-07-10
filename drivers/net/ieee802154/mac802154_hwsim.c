@@ -268,7 +268,7 @@ static int hwsim_get_radio(struct sk_buff *skb, struct hwsim_phy *phy,
 			   struct netlink_callback *cb, int flags)
 {
 	void *hdr;
-	int res = -EMSGSIZE;
+	int res;
 
 	hdr = genlmsg_put(skb, portid, seq, &hwsim_genl_family, flags,
 			  MAC802154_HWSIM_CMD_GET_RADIO);
@@ -632,6 +632,7 @@ static struct genl_family hwsim_genl_family __ro_after_init = {
 	.module = THIS_MODULE,
 	.small_ops = hwsim_nl_ops,
 	.n_small_ops = ARRAY_SIZE(hwsim_nl_ops),
+	.resv_start_op = MAC802154_HWSIM_CMD_NEW_EDGE + 1,
 	.mcgrps = hwsim_mcgrps,
 	.n_mcgrps = ARRAY_SIZE(hwsim_mcgrps),
 };
@@ -793,7 +794,7 @@ static int hwsim_add_one(struct genl_info *info, struct device *dev,
 	phy->idx = idx;
 	INIT_LIST_HEAD(&phy->edges);
 
-	hw->flags = IEEE802154_HW_PROMISCUOUS;
+	hw->flags = IEEE802154_HW_PROMISCUOUS | IEEE802154_HW_RX_DROP_BAD_CKSUM;
 	hw->parent = dev;
 
 	err = ieee802154_register_hw(hw);

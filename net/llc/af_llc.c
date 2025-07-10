@@ -224,8 +224,7 @@ static int llc_ui_release(struct socket *sock)
 	} else {
 		release_sock(sk);
 	}
-	if (llc->dev)
-		dev_put(llc->dev);
+	netdev_put(llc->dev, &llc->dev_tracker);
 	sock_put(sk);
 	sock_orphan(sk);
 	sock->sk = NULL;
@@ -310,6 +309,7 @@ static int llc_ui_autobind(struct socket *sock, struct sockaddr_llc *addr)
 
 	/* Note: We do not expect errors from this point. */
 	llc->dev = dev;
+	netdev_tracker_alloc(llc->dev, &llc->dev_tracker, GFP_KERNEL);
 	dev = NULL;
 
 	memcpy(llc->laddr.mac, llc->dev->dev_addr, IFHWADDRLEN);
@@ -374,11 +374,11 @@ static int llc_ui_bind(struct socket *sock, struct sockaddr *uaddr, int addrlen)
 		dev = dev_getbyhwaddr_rcu(&init_net, addr->sllc_arphrd,
 					   addr->sllc_mac);
 	}
-	if (dev)
-		dev_hold(dev);
+	dev_hold(dev);
 	rcu_read_unlock();
 	if (!dev)
 		goto out;
+
 	if (!addr->sllc_sap) {
 		rc = -EUSERS;
 		addr->sllc_sap = llc_ui_autoport();
@@ -413,6 +413,7 @@ static int llc_ui_bind(struct socket *sock, struct sockaddr *uaddr, int addrlen)
 
 	/* Note: We do not expect errors from this point. */
 	llc->dev = dev;
+	netdev_tracker_alloc(llc->dev, &llc->dev_tracker, GFP_KERNEL);
 	dev = NULL;
 
 	llc->laddr.lsap = addr->sllc_sap;

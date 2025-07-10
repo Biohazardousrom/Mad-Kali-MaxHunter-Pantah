@@ -25,6 +25,13 @@
 #define FTDI_4232H_PID 0x6011 /* Quad channel hi-speed device */
 #define FTDI_232H_PID  0x6014 /* Single channel hi-speed device */
 #define FTDI_FTX_PID   0x6015 /* FT-X series (FT201X, FT230X, FT231X, etc) */
+#define FTDI_FT2233HP_PID	0x6040 /* Dual channel hi-speed device with PD */
+#define FTDI_FT4233HP_PID	0x6041 /* Quad channel hi-speed device with PD */
+#define FTDI_FT2232HP_PID	0x6042 /* Dual channel hi-speed device with PD */
+#define FTDI_FT4232HP_PID	0x6043 /* Quad channel hi-speed device with PD */
+#define FTDI_FT233HP_PID	0x6044 /* Dual channel hi-speed device with PD */
+#define FTDI_FT232HP_PID	0x6045 /* Dual channel hi-speed device with PD */
+#define FTDI_FT4232HA_PID	0x6048 /* Quad channel automotive grade hi-speed device */
 #define FTDI_SIO_PID	0x8372	/* Product Id SIO application of 8U100AX */
 #define FTDI_232RL_PID  0xFBFA  /* Product ID for FT232RL */
 
@@ -1599,3 +1606,9 @@
 #define UBLOX_VID			0x1546
 #define UBLOX_C099F9P_ZED_PID		0x0502
 #define UBLOX_C099F9P_ODIN_PID		0x0503
+
+/*
+ * GMC devices
+ */
+#define GMC_VID				0x1cd7
+#define GMC_Z216C_PID			0x0217 /* GMC Z216C Adapter IR-USB */

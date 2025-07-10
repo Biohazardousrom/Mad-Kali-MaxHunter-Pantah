@@ -27,7 +27,28 @@ static enum power_supply_property ucsi_psy_props[] = {
 	POWER_SUPPLY_PROP_VOLTAGE_NOW,
 	POWER_SUPPLY_PROP_CURRENT_MAX,
 	POWER_SUPPLY_PROP_CURRENT_NOW,
+	POWER_SUPPLY_PROP_SCOPE,
 };
+
+static int ucsi_psy_get_scope(struct ucsi_connector *con,
+			      union power_supply_propval *val)
+{
+	u8 scope = POWER_SUPPLY_SCOPE_UNKNOWN;
+	struct device *dev = con->ucsi->dev;
+
+	device_property_read_u8(dev, "scope", &scope);
+	if (scope == POWER_SUPPLY_SCOPE_UNKNOWN) {
+		u32 mask = UCSI_CAP_ATTR_POWER_AC_SUPPLY |
+			   UCSI_CAP_ATTR_BATTERY_CHARGING;
+
+		if (con->ucsi->cap.attributes & mask)
+			scope = POWER_SUPPLY_SCOPE_SYSTEM;
+		else
+			scope = POWER_SUPPLY_SCOPE_DEVICE;
+	}
+	val->intval = scope;
+	return 0;
+}
 
 static int ucsi_psy_get_online(struct ucsi_connector *con,
 			       union power_supply_propval *val)
@@ -69,7 +90,7 @@ static int ucsi_psy_get_voltage_max(struct ucsi_connector *con,
 
 	switch (UCSI_CONSTAT_PWR_OPMODE(con->status.flags)) {
 	case UCSI_CONSTAT_PWR_OPMODE_PD:
-		if (con->num_pdos > 0 && con->num_pdos <= UCSI_MAX_PDOS) {
+		if (con->num_pdos > 0) {
 			pdo = con->src_pdos[con->num_pdos - 1];
 			val->intval = pdo_fixed_voltage(pdo) * 1000;
 		} else {
@@ -98,7 +119,7 @@ static int ucsi_psy_get_voltage_now(struct ucsi_connector *con,
 	switch (UCSI_CONSTAT_PWR_OPMODE(con->status.flags)) {
 	case UCSI_CONSTAT_PWR_OPMODE_PD:
 		index = rdo_index(con->rdo);
-		if (index > 0 && index <= UCSI_MAX_PDOS) {
+		if (index > 0) {
 			pdo = con->src_pdos[index - 1];
 			val->intval = pdo_fixed_voltage(pdo) * 1000;
 		} else {
@@ -125,7 +146,7 @@ static int ucsi_psy_get_current_max(struct ucsi_connector *con,
 
 	switch (UCSI_CONSTAT_PWR_OPMODE(con->status.flags)) {
 	case UCSI_CONSTAT_PWR_OPMODE_PD:
-		if (con->num_pdos > 0 && con->num_pdos <= UCSI_MAX_PDOS) {
+		if (con->num_pdos > 0) {
 			pdo = con->src_pdos[con->num_pdos - 1];
 			val->intval = pdo_max_current(pdo) * 1000;
 		} else {
@@ -194,6 +215,8 @@ static int ucsi_psy_get_prop(struct power_supply *psy,
 		return ucsi_psy_get_current_max(con, val);
 	case POWER_SUPPLY_PROP_CURRENT_NOW:
 		return ucsi_psy_get_current_now(con, val);
+	case POWER_SUPPLY_PROP_SCOPE:
+		return ucsi_psy_get_scope(con, val);
 	default:
 		return -EINVAL;
 	}
@@ -220,11 +243,11 @@ int ucsi_register_port_psy(struct ucsi_connector *con)
 		return -ENOMEM;
 
 	con->psy_desc.name = psy_name;
-	con->psy_desc.type = POWER_SUPPLY_TYPE_USB,
+	con->psy_desc.type = POWER_SUPPLY_TYPE_USB;
 	con->psy_desc.usb_types = ucsi_psy_usb_types;
 	con->psy_desc.num_usb_types = ARRAY_SIZE(ucsi_psy_usb_types);
-	con->psy_desc.properties = ucsi_psy_props,
-	con->psy_desc.num_properties = ARRAY_SIZE(ucsi_psy_props),
+	con->psy_desc.properties = ucsi_psy_props;
+	con->psy_desc.num_properties = ARRAY_SIZE(ucsi_psy_props);
 	con->psy_desc.get_property = ucsi_psy_get_prop;
 
 	con->psy = power_supply_register(dev, &con->psy_desc, &psy_cfg);

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier:	GPL-2.0
+// SPDX-License-Identifier: GPL-2.0
 /* Copyright 2019 Linaro, Ltd, Rob Herring <robh@kernel.org> */
 
 #include <drm/panfrost_drm.h>
@@ -34,10 +34,13 @@ static int wait_ready(struct panfrost_device *pfdev, u32 as_nr)
 	/* Wait for the MMU status to indicate there is no active command, in
 	 * case one is pending. */
 	ret = readl_relaxed_poll_timeout_atomic(pfdev->iomem + AS_STATUS(as_nr),
-		val, !(val & AS_STATUS_AS_ACTIVE), 10, 1000);
+		val, !(val & AS_STATUS_AS_ACTIVE), 10, 100000);
 
-	if (ret)
+	if (ret) {
+		/* The GPU hung, let's trigger a reset */
+		panfrost_device_schedule_reset(pfdev);
 		dev_err(pfdev->dev, "AS_ACTIVE bit stuck\n");
+	}
 
 	return ret;
 }
@@ -55,21 +58,37 @@ static int write_cmd(struct panfrost_device *pfdev, u32 as_nr, u32 cmd)
 }
 
 static void lock_region(struct panfrost_device *pfdev, u32 as_nr,
-			u64 iova, u64 size)
+			u64 region_start, u64 size)
 {
 	u8 region_width;
-	u64 region = iova & PAGE_MASK;
+	u64 region;
+	u64 region_end = region_start + size;
 
-	/* The size is encoded as ceil(log2) minus(1), which may be calculated
-	 * with fls. The size must be clamped to hardware bounds.
+	if (!size)
+		return;
+
+	/*
+	 * The locked region is a naturally aligned power of 2 block encoded as
+	 * log2 minus(1).
+	 * Calculate the desired start/end and look for the highest bit which
+	 * differs. The smallest naturally aligned block must include this bit
+	 * change, the desired region starts with this bit (and subsequent bits)
+	 * zeroed and ends with the bit (and subsequent bits) set to one.
 	 */
-	size = max_t(u64, size, AS_LOCK_REGION_MIN_SIZE);
-	region_width = fls64(size - 1) - 1;
-	region |= region_width;
+	region_width = max(fls64(region_start ^ (region_end - 1)),
+			   const_ilog2(AS_LOCK_REGION_MIN_SIZE)) - 1;
+
+	/*
+	 * Mask off the low bits of region_start (which would be ignored by
+	 * the hardware anyway)
+	 */
+	region_start &= GENMASK_ULL(63, region_width);
+
+	region = region_width | region_start;
 
 	/* Lock the region that needs to be updated */
-	mmu_write(pfdev, AS_LOCKADDR_LO(as_nr), region & 0xFFFFFFFFUL);
-	mmu_write(pfdev, AS_LOCKADDR_HI(as_nr), (region >> 32) & 0xFFFFFFFFUL);
+	mmu_write(pfdev, AS_LOCKADDR_LO(as_nr), lower_32_bits(region));
+	mmu_write(pfdev, AS_LOCKADDR_HI(as_nr), upper_32_bits(region));
 	write_cmd(pfdev, as_nr, AS_COMMAND_LOCK);
 }
 
@@ -111,14 +130,14 @@ static void panfrost_mmu_enable(struct panfrost_device *pfdev, struct panfrost_m
 
 	mmu_hw_do_operation_locked(pfdev, as_nr, 0, ~0ULL, AS_COMMAND_FLUSH_MEM);
 
-	mmu_write(pfdev, AS_TRANSTAB_LO(as_nr), transtab & 0xffffffffUL);
-	mmu_write(pfdev, AS_TRANSTAB_HI(as_nr), transtab >> 32);
+	mmu_write(pfdev, AS_TRANSTAB_LO(as_nr), lower_32_bits(transtab));
+	mmu_write(pfdev, AS_TRANSTAB_HI(as_nr), upper_32_bits(transtab));
 
 	/* Need to revisit mem attrs.
 	 * NC is the default, Mali driver is inner WT.
 	 */
-	mmu_write(pfdev, AS_MEMATTR_LO(as_nr), memattr & 0xffffffffUL);
-	mmu_write(pfdev, AS_MEMATTR_HI(as_nr), memattr >> 32);
+	mmu_write(pfdev, AS_MEMATTR_LO(as_nr), lower_32_bits(memattr));
+	mmu_write(pfdev, AS_MEMATTR_HI(as_nr), upper_32_bits(memattr));
 
 	write_cmd(pfdev, as_nr, AS_COMMAND_UPDATE);
 }
@@ -145,6 +164,7 @@ u32 panfrost_mmu_as_get(struct panfrost_device *pfdev, struct panfrost_mmu *mmu)
 	as = mmu->as;
 	if (as >= 0) {
 		int en = atomic_inc_return(&mmu->as_count);
+		u32 mask = BIT(as) | BIT(16 + as);
 
 		/*
 		 * AS can be retained by active jobs or a perfcnt context,
@@ -153,6 +173,18 @@ u32 panfrost_mmu_as_get(struct panfrost_device *pfdev, struct panfrost_mmu *mmu)
 		WARN_ON(en >= (NUM_JOB_SLOTS + 1));
 
 		list_move(&mmu->list, &pfdev->as_lru_list);
+
+		if (pfdev->as_faulty_mask & mask) {
+			/* Unhandled pagefault on this AS, the MMU was
+			 * disabled. We need to re-enable the MMU after
+			 * clearing+unmasking the AS interrupts.
+			 */
+			mmu_write(pfdev, MMU_INT_CLEAR, mask);
+			mmu_write(pfdev, MMU_INT_MASK, ~pfdev->as_faulty_mask);
+			pfdev->as_faulty_mask &= ~mask;
+			panfrost_mmu_enable(pfdev, mmu);
+		}
+
 		goto out;
 	}
 
@@ -202,6 +234,7 @@ void panfrost_mmu_reset(struct panfrost_device *pfdev)
 	spin_lock(&pfdev->as_lock);
 
 	pfdev->as_alloc_mask = 0;
+	pfdev->as_faulty_mask = 0;
 
 	list_for_each_entry_safe(mmu, mmu_tmp, &pfdev->as_lru_list, list) {
 		mmu->as = -1;
@@ -215,11 +248,24 @@ void panfrost_mmu_reset(struct panfrost_device *pfdev)
 	mmu_write(pfdev, MMU_INT_MASK, ~0);
 }
 
-static size_t get_pgsize(u64 addr, size_t size)
+static size_t get_pgsize(u64 addr, size_t size, size_t *count)
 {
-	if (addr & (SZ_2M - 1) || size < SZ_2M)
-		return SZ_4K;
+	/*
+	 * io-pgtable only operates on multiple pages within a single table
+	 * entry, so we need to split at boundaries of the table size, i.e.
+	 * the next block size up. The distance from address A to the next
+	 * boundary of block size B is logically B - A % B, but in unsigned
+	 * two's complement where B is a power of two we get the equivalence
+	 * B - A % B == (B - A) % B == (n * B - A) % B, and choose n = 0 :)
+	 */
+	size_t blk_offset = -addr % SZ_2M;
 
+	if (blk_offset || size < SZ_2M) {
+		*count = min_not_zero(blk_offset, size) / SZ_4K;
+		return SZ_4K;
+	}
+	blk_offset = -addr % SZ_1G ?: SZ_1G;
+	*count = min(blk_offset, size) / SZ_2M;
 	return SZ_2M;
 }
 
@@ -254,12 +300,16 @@ static int mmu_map_sg(struct panfrost_device *pfdev, struct panfrost_mmu *mmu,
 		dev_dbg(pfdev->dev, "map: as=%d, iova=%llx, paddr=%lx, len=%zx", mmu->as, iova, paddr, len);
 
 		while (len) {
-			size_t pgsize = get_pgsize(iova | paddr, len);
+			size_t pgcount, mapped = 0;
+			size_t pgsize = get_pgsize(iova | paddr, len, &pgcount);
 
-			ops->map(ops, iova, paddr, pgsize, prot, GFP_KERNEL);
-			iova += pgsize;
-			paddr += pgsize;
-			len -= pgsize;
+			ops->map_pages(ops, iova, paddr, pgsize, pgcount, prot,
+				       GFP_KERNEL, &mapped);
+			/* Don't get stuck if things have gone wrong */
+			mapped = max(mapped, pgsize);
+			iova += mapped;
+			paddr += mapped;
+			len -= mapped;
 		}
 	}
 
@@ -271,7 +321,8 @@ static int mmu_map_sg(struct panfrost_device *pfdev, struct panfrost_mmu *mmu,
 int panfrost_mmu_map(struct panfrost_gem_mapping *mapping)
 {
 	struct panfrost_gem_object *bo = mapping->obj;
-	struct drm_gem_object *obj = &bo->base.base;
+	struct drm_gem_shmem_object *shmem = &bo->base;
+	struct drm_gem_object *obj = &shmem->base;
 	struct panfrost_device *pfdev = to_panfrost_device(obj->dev);
 	struct sg_table *sgt;
 	int prot = IOMMU_READ | IOMMU_WRITE;
@@ -282,7 +333,7 @@ int panfrost_mmu_map(struct panfrost_gem_mapping *mapping)
 	if (bo->noexec)
 		prot |= IOMMU_NOEXEC;
 
-	sgt = drm_gem_shmem_get_pages_sgt(obj);
+	sgt = drm_gem_shmem_get_pages_sgt(shmem);
 	if (WARN_ON(IS_ERR(sgt)))
 		return PTR_ERR(sgt);
 
@@ -310,15 +361,17 @@ void panfrost_mmu_unmap(struct panfrost_gem_mapping *mapping)
 		mapping->mmu->as, iova, len);
 
 	while (unmapped_len < len) {
-		size_t unmapped_page;
-		size_t pgsize = get_pgsize(iova, len - unmapped_len);
+		size_t unmapped_page, pgcount;
+		size_t pgsize = get_pgsize(iova, len - unmapped_len, &pgcount);
 
-		if (ops->iova_to_phys(ops, iova)) {
-			unmapped_page = ops->unmap(ops, iova, pgsize, NULL);
-			WARN_ON(unmapped_page != pgsize);
+		if (bo->is_heap)
+			pgcount = 1;
+		if (!bo->is_heap || ops->iova_to_phys(ops, iova)) {
+			unmapped_page = ops->unmap_pages(ops, iova, pgsize, pgcount, NULL);
+			WARN_ON(unmapped_page != pgsize * pgcount);
 		}
-		iova += pgsize;
-		unmapped_len += pgsize;
+		iova += pgsize * pgcount;
+		unmapped_len += pgsize * pgcount;
 	}
 
 	panfrost_mmu_flush_range(pfdev, mapping->mmu,
@@ -626,22 +679,20 @@ static irqreturn_t panfrost_mmu_irq_handler_thread(int irq, void *data)
 {
 	struct panfrost_device *pfdev = data;
 	u32 status = mmu_read(pfdev, MMU_INT_RAWSTAT);
-	int i, ret;
+	int ret;
 
-	for (i = 0; status; i++) {
-		u32 mask = BIT(i) | BIT(i + 16);
+	while (status) {
+		u32 as = ffs(status | (status >> 16)) - 1;
+		u32 mask = BIT(as) | BIT(as + 16);
 		u64 addr;
 		u32 fault_status;
 		u32 exception_type;
 		u32 access_type;
 		u32 source_id;
 
-		if (!(status & mask))
-			continue;
-
-		fault_status = mmu_read(pfdev, AS_FAULTSTATUS(i));
-		addr = mmu_read(pfdev, AS_FAULTADDRESS_LO(i));
-		addr |= (u64)mmu_read(pfdev, AS_FAULTADDRESS_HI(i)) << 32;
+		fault_status = mmu_read(pfdev, AS_FAULTSTATUS(as));
+		addr = mmu_read(pfdev, AS_FAULTADDRESS_LO(as));
+		addr |= (u64)mmu_read(pfdev, AS_FAULTADDRESS_HI(as)) << 32;
 
 		/* decode the fault status */
 		exception_type = fault_status & 0xFF;
@@ -652,10 +703,10 @@ static irqreturn_t panfrost_mmu_irq_handler_thread(int irq, void *data)
 
 		/* Page fault only */
 		ret = -1;
-		if ((status & mask) == BIT(i) && (exception_type & 0xF8) == 0xC0)
-			ret = panfrost_mmu_map_fault_addr(pfdev, i, addr);
+		if ((status & mask) == BIT(as) && (exception_type & 0xF8) == 0xC0)
+			ret = panfrost_mmu_map_fault_addr(pfdev, as, addr);
 
-		if (ret)
+		if (ret) {
 			/* terminal fault, print info about the fault */
 			dev_err(pfdev->dev,
 				"Unhandled Page fault in AS%d at VA 0x%016llX\n"
@@ -665,18 +716,36 @@ static irqreturn_t panfrost_mmu_irq_handler_thread(int irq, void *data)
 				"exception type 0x%X: %s\n"
 				"access type 0x%X: %s\n"
 				"source id 0x%X\n",
-				i, addr,
+				as, addr,
 				"TODO",
 				fault_status,
 				(fault_status & (1 << 10) ? "DECODER FAULT" : "SLAVE FAULT"),
-				exception_type, panfrost_exception_name(pfdev, exception_type),
+				exception_type, panfrost_exception_name(exception_type),
 				access_type, access_type_name(pfdev, fault_status),
 				source_id);
 
+			spin_lock(&pfdev->as_lock);
+			/* Ignore MMU interrupts on this AS until it's been
+			 * re-enabled.
+			 */
+			pfdev->as_faulty_mask |= mask;
+
+			/* Disable the MMU to kill jobs on this AS. */
+			panfrost_mmu_disable(pfdev, as);
+			spin_unlock(&pfdev->as_lock);
+		}
+
 		status &= ~mask;
+
+		/* If we received new MMU interrupts, process them before returning. */
+		if (!status)
+			status = mmu_read(pfdev, MMU_INT_RAWSTAT) & ~pfdev->as_faulty_mask;
 	}
 
-	mmu_write(pfdev, MMU_INT_MASK, ~0);
+	spin_lock(&pfdev->as_lock);
+	mmu_write(pfdev, MMU_INT_MASK, ~pfdev->as_faulty_mask);
+	spin_unlock(&pfdev->as_lock);
+
 	return IRQ_HANDLED;
 };
 

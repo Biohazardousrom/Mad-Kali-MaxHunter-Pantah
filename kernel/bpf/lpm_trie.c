@@ -14,6 +14,7 @@
 #include <linux/vmalloc.h>
 #include <net/ipv6.h>
 #include <uapi/linux/btf.h>
+#include <linux/btf_ids.h>
 
 /* Intermediate node */
 #define LPM_TREE_NODE_FLAG_IM BIT(0)
@@ -235,7 +236,8 @@ static void *trie_lookup_elem(struct bpf_map *map, void *_key)
 
 	/* Start walking the trie from the root node ... */
 
-	for (node = rcu_dereference(trie->root); node;) {
+	for (node = rcu_dereference_check(trie->root, rcu_read_lock_bh_held());
+	     node;) {
 		unsigned int next_bit;
 		size_t matchlen;
 
@@ -267,7 +269,8 @@ static void *trie_lookup_elem(struct bpf_map *map, void *_key)
 		 * traverse down.
 		 */
 		next_bit = extract_bit(key->data, node->prefixlen);
-		node = rcu_dereference(node->child[next_bit]);
+		node = rcu_dereference_check(node->child[next_bit],
+					     rcu_read_lock_bh_held());
 	}
 
 	if (!found)
@@ -285,8 +288,8 @@ static struct lpm_trie_node *lpm_trie_node_alloc(const struct lpm_trie *trie,
 	if (value)
 		size += trie->map.value_size;
 
-	node = kmalloc_node(size, GFP_ATOMIC | __GFP_NOWARN,
-			    trie->map.numa_node);
+	node = bpf_map_kmalloc_node(&trie->map, size, GFP_NOWAIT | __GFP_NOWARN,
+				    trie->map.numa_node);
 	if (!node)
 		return NULL;
 
@@ -413,7 +416,7 @@ static int trie_update_elem(struct bpf_map *map,
 		rcu_assign_pointer(im_node->child[1], node);
 	}
 
-	/* Finally, assign the intermediate node to the determined spot */
+	/* Finally, assign the intermediate node to the determined slot */
 	rcu_assign_pointer(*slot, im_node);
 
 out:
@@ -543,8 +546,6 @@ out:
 static struct bpf_map *trie_alloc(union bpf_attr *attr)
 {
 	struct lpm_trie *trie;
-	u64 cost = sizeof(*trie), cost_per_node;
-	int ret;
 
 	if (!bpf_capable())
 		return ERR_PTR(-EPERM);
@@ -560,7 +561,7 @@ static struct bpf_map *trie_alloc(union bpf_attr *attr)
 	    attr->value_size > LPM_VAL_SIZE_MAX)
 		return ERR_PTR(-EINVAL);
 
-	trie = kzalloc(sizeof(*trie), GFP_USER | __GFP_NOWARN);
+	trie = bpf_map_area_alloc(sizeof(*trie), NUMA_NO_NODE);
 	if (!trie)
 		return ERR_PTR(-ENOMEM);
 
@@ -570,20 +571,9 @@ static struct bpf_map *trie_alloc(union bpf_attr *attr)
 			  offsetof(struct bpf_lpm_trie_key, data);
 	trie->max_prefixlen = trie->data_size * 8;
 
-	cost_per_node = sizeof(struct lpm_trie_node) +
-			attr->value_size + trie->data_size;
-	cost += (u64) attr->max_entries * cost_per_node;
-
-	ret = bpf_map_charge_init(&trie->map.memory, cost);
-	if (ret)
-		goto out_err;
-
 	spin_lock_init(&trie->lock);
 
 	return &trie->map;
-out_err:
-	kfree(trie);
-	return ERR_PTR(ret);
 }
 
 static void trie_free(struct bpf_map *map)
@@ -622,7 +612,7 @@ static void trie_free(struct bpf_map *map)
 	}
 
 out:
-	kfree(trie);
+	bpf_map_area_free(trie);
 }
 
 static int trie_get_next_key(struct bpf_map *map, void *_key, void *_next_key)
@@ -733,7 +723,7 @@ static int trie_check_btf(const struct bpf_map *map,
 	       -EINVAL : 0;
 }
 
-static int trie_map_btf_id;
+BTF_ID_LIST_SINGLE(trie_map_btf_ids, struct, lpm_trie)
 const struct bpf_map_ops trie_map_ops = {
 	.map_meta_equal = bpf_map_meta_equal,
 	.map_alloc = trie_alloc,
@@ -742,7 +732,9 @@ const struct bpf_map_ops trie_map_ops = {
 	.map_lookup_elem = trie_lookup_elem,
 	.map_update_elem = trie_update_elem,
 	.map_delete_elem = trie_delete_elem,
+	.map_lookup_batch = generic_map_lookup_batch,
+	.map_update_batch = generic_map_update_batch,
+	.map_delete_batch = generic_map_delete_batch,
 	.map_check_btf = trie_check_btf,
-	.map_btf_name = "lpm_trie",
-	.map_btf_id = &trie_map_btf_id,
+	.map_btf_id = &trie_map_btf_ids[0],
 };

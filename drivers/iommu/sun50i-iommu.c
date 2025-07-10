@@ -7,7 +7,6 @@
 #include <linux/clk.h>
 #include <linux/device.h>
 #include <linux/dma-direction.h>
-#include <linux/dma-iommu.h>
 #include <linux/dma-mapping.h>
 #include <linux/err.h>
 #include <linux/errno.h>
@@ -93,6 +92,8 @@
 
 #define NUM_PT_ENTRIES			256
 #define PT_SIZE				(NUM_PT_ENTRIES * PT_ENTRY_SIZE)
+
+#define SPAGE_SIZE			4096
 
 struct sun50i_iommu {
 	struct iommu_device iommu;
@@ -296,6 +297,62 @@ static void sun50i_table_flush(struct sun50i_iommu_domain *sun50i_domain,
 	dma_sync_single_for_device(iommu->dev, dma, size, DMA_TO_DEVICE);
 }
 
+static void sun50i_iommu_zap_iova(struct sun50i_iommu *iommu,
+				  unsigned long iova)
+{
+	u32 reg;
+	int ret;
+
+	iommu_write(iommu, IOMMU_TLB_IVLD_ADDR_REG, iova);
+	iommu_write(iommu, IOMMU_TLB_IVLD_ADDR_MASK_REG, GENMASK(31, 12));
+	iommu_write(iommu, IOMMU_TLB_IVLD_ENABLE_REG,
+		    IOMMU_TLB_IVLD_ENABLE_ENABLE);
+
+	ret = readl_poll_timeout_atomic(iommu->base + IOMMU_TLB_IVLD_ENABLE_REG,
+					reg, !reg, 1, 2000);
+	if (ret)
+		dev_warn(iommu->dev, "TLB invalidation timed out!\n");
+}
+
+static void sun50i_iommu_zap_ptw_cache(struct sun50i_iommu *iommu,
+				       unsigned long iova)
+{
+	u32 reg;
+	int ret;
+
+	iommu_write(iommu, IOMMU_PC_IVLD_ADDR_REG, iova);
+	iommu_write(iommu, IOMMU_PC_IVLD_ENABLE_REG,
+		    IOMMU_PC_IVLD_ENABLE_ENABLE);
+
+	ret = readl_poll_timeout_atomic(iommu->base + IOMMU_PC_IVLD_ENABLE_REG,
+					reg, !reg, 1, 2000);
+	if (ret)
+		dev_warn(iommu->dev, "PTW cache invalidation timed out!\n");
+}
+
+static void sun50i_iommu_zap_range(struct sun50i_iommu *iommu,
+				   unsigned long iova, size_t size)
+{
+	assert_spin_locked(&iommu->iommu_lock);
+
+	iommu_write(iommu, IOMMU_AUTO_GATING_REG, 0);
+
+	sun50i_iommu_zap_iova(iommu, iova);
+	sun50i_iommu_zap_iova(iommu, iova + SPAGE_SIZE);
+	if (size > SPAGE_SIZE) {
+		sun50i_iommu_zap_iova(iommu, iova + size);
+		sun50i_iommu_zap_iova(iommu, iova + size + SPAGE_SIZE);
+	}
+	sun50i_iommu_zap_ptw_cache(iommu, iova);
+	sun50i_iommu_zap_ptw_cache(iommu, iova + SZ_1M);
+	if (size > SZ_1M) {
+		sun50i_iommu_zap_ptw_cache(iommu, iova + size);
+		sun50i_iommu_zap_ptw_cache(iommu, iova + size + SZ_1M);
+	}
+
+	iommu_write(iommu, IOMMU_AUTO_GATING_REG, IOMMU_AUTO_GATING_ENABLE);
+}
+
 static int sun50i_iommu_flush_all_tlb(struct sun50i_iommu *iommu)
 {
 	u32 reg;
@@ -342,6 +399,18 @@ static void sun50i_iommu_flush_iotlb_all(struct iommu_domain *domain)
 
 	spin_lock_irqsave(&iommu->iommu_lock, flags);
 	sun50i_iommu_flush_all_tlb(iommu);
+	spin_unlock_irqrestore(&iommu->iommu_lock, flags);
+}
+
+static void sun50i_iommu_iotlb_sync_map(struct iommu_domain *domain,
+					unsigned long iova, size_t size)
+{
+	struct sun50i_iommu_domain *sun50i_domain = to_sun50i_domain(domain);
+	struct sun50i_iommu *iommu = sun50i_domain->iommu;
+	unsigned long flags;
+
+	spin_lock_irqsave(&iommu->iommu_lock, flags);
+	sun50i_iommu_zap_range(iommu, iova, size);
 	spin_unlock_irqrestore(&iommu->iommu_lock, flags);
 }
 
@@ -610,14 +679,10 @@ static struct iommu_domain *sun50i_iommu_domain_alloc(unsigned type)
 	if (!sun50i_domain)
 		return NULL;
 
-	if (type == IOMMU_DOMAIN_DMA &&
-	    iommu_get_dma_cookie(&sun50i_domain->domain))
-		goto err_free_domain;
-
 	sun50i_domain->dt = (u32 *)__get_free_pages(GFP_KERNEL | __GFP_ZERO,
 						    get_order(DT_SIZE));
 	if (!sun50i_domain->dt)
-		goto err_put_cookie;
+		goto err_free_domain;
 
 	refcount_set(&sun50i_domain->refcnt, 1);
 
@@ -626,10 +691,6 @@ static struct iommu_domain *sun50i_iommu_domain_alloc(unsigned type)
 	sun50i_domain->domain.geometry.force_aperture = true;
 
 	return &sun50i_domain->domain;
-
-err_put_cookie:
-	if (type == IOMMU_DOMAIN_DMA)
-		iommu_put_dma_cookie(&sun50i_domain->domain);
 
 err_free_domain:
 	kfree(sun50i_domain);
@@ -643,8 +704,6 @@ static void sun50i_iommu_domain_free(struct iommu_domain *domain)
 
 	free_pages((unsigned long)sun50i_domain->dt, get_order(DT_SIZE));
 	sun50i_domain->dt = NULL;
-
-	iommu_put_dma_cookie(domain);
 
 	kfree(sun50i_domain);
 }
@@ -749,8 +808,6 @@ static struct iommu_device *sun50i_iommu_probe_device(struct device *dev)
 	return &iommu->iommu;
 }
 
-static void sun50i_iommu_release_device(struct device *dev) {}
-
 static struct iommu_group *sun50i_iommu_device_group(struct device *dev)
 {
 	struct sun50i_iommu *iommu = sun50i_iommu_from_dev(dev);
@@ -771,19 +828,21 @@ static int sun50i_iommu_of_xlate(struct device *dev,
 
 static const struct iommu_ops sun50i_iommu_ops = {
 	.pgsize_bitmap	= SZ_4K,
-	.attach_dev	= sun50i_iommu_attach_device,
-	.detach_dev	= sun50i_iommu_detach_device,
 	.device_group	= sun50i_iommu_device_group,
 	.domain_alloc	= sun50i_iommu_domain_alloc,
-	.domain_free	= sun50i_iommu_domain_free,
-	.flush_iotlb_all = sun50i_iommu_flush_iotlb_all,
-	.iotlb_sync	= sun50i_iommu_iotlb_sync,
-	.iova_to_phys	= sun50i_iommu_iova_to_phys,
-	.map		= sun50i_iommu_map,
 	.of_xlate	= sun50i_iommu_of_xlate,
 	.probe_device	= sun50i_iommu_probe_device,
-	.release_device	= sun50i_iommu_release_device,
-	.unmap		= sun50i_iommu_unmap,
+	.default_domain_ops = &(const struct iommu_domain_ops) {
+		.attach_dev	= sun50i_iommu_attach_device,
+		.detach_dev	= sun50i_iommu_detach_device,
+		.flush_iotlb_all = sun50i_iommu_flush_iotlb_all,
+		.iotlb_sync_map = sun50i_iommu_iotlb_sync_map,
+		.iotlb_sync	= sun50i_iommu_iotlb_sync,
+		.iova_to_phys	= sun50i_iommu_iova_to_phys,
+		.map		= sun50i_iommu_map,
+		.unmap		= sun50i_iommu_unmap,
+		.free		= sun50i_iommu_domain_free,
+	}
 };
 
 static void sun50i_iommu_report_fault(struct sun50i_iommu *iommu,
@@ -797,6 +856,8 @@ static void sun50i_iommu_report_fault(struct sun50i_iommu *iommu,
 		report_iommu_fault(iommu->domain, iommu->dev, iova, prot);
 	else
 		dev_err(iommu->dev, "Page fault while iommu not attached to any domain?\n");
+
+	sun50i_iommu_zap_range(iommu, iova, SPAGE_SIZE);
 }
 
 static phys_addr_t sun50i_iommu_handle_pt_irq(struct sun50i_iommu *iommu,
@@ -972,10 +1033,7 @@ static int sun50i_iommu_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_free_group;
 
-	iommu_device_set_ops(&iommu->iommu, &sun50i_iommu_ops);
-	iommu_device_set_fwnode(&iommu->iommu, &pdev->dev.of_node->fwnode);
-
-	ret = iommu_device_register(&iommu->iommu);
+	ret = iommu_device_register(&iommu->iommu, &sun50i_iommu_ops, &pdev->dev);
 	if (ret)
 		goto err_remove_sysfs;
 
@@ -983,8 +1041,6 @@ static int sun50i_iommu_probe(struct platform_device *pdev)
 			       dev_name(&pdev->dev), iommu);
 	if (ret < 0)
 		goto err_unregister;
-
-	bus_set_iommu(&platform_bus_type, &sun50i_iommu_ops);
 
 	return 0;
 

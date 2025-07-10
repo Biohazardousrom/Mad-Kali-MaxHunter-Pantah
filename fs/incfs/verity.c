@@ -42,7 +42,7 @@
  */
 
 #include <crypto/hash.h>
-#include <crypto/sha.h>
+#include <crypto/sha2.h>
 #include <linux/fsverity.h>
 #include <linux/mount.h>
 
@@ -104,7 +104,7 @@ static int incfs_end_enable_verity(struct file *filp, u8 *sig, size_t sig_size)
 	/*
 	 * Set verity xattr so we can set S_VERITY without opening backing file
 	 */
-	error = vfs_setxattr(bfc->bc_file->f_path.dentry,
+	error = vfs_setxattr(&init_user_ns, bfc->bc_file->f_path.dentry,
 			     INCFS_XATTR_VERITY_NAME, NULL, 0, XATTR_CREATE);
 	if (error) {
 		pr_warn("incfs: error setting verity xattr: %d\n", error);
@@ -303,8 +303,8 @@ static int incfs_build_merkle_tree(struct file *f, struct data_file *df,
 	struct mem_range buf = {.len = INCFS_DATA_FILE_BLOCK_SIZE};
 	struct mem_range tmp = {.len = 2 * INCFS_DATA_FILE_BLOCK_SIZE};
 
-	buf.data = (u8 *)__get_free_pages(GFP_NOFS, get_order(buf.len));
-	tmp.data = (u8 *)__get_free_pages(GFP_NOFS, get_order(tmp.len));
+	buf.data = (u8 *)kzalloc(buf.len, GFP_NOFS);
+	tmp.data = (u8 *)kzalloc(tmp.len, GFP_NOFS);
 	if (!buf.data || !tmp.data) {
 		error = -ENOMEM;
 		goto out;
@@ -372,8 +372,8 @@ static int incfs_build_merkle_tree(struct file *f, struct data_file *df,
 	}
 
 out:
-	free_pages((unsigned long)tmp.data, get_order(tmp.len));
-	free_pages((unsigned long)buf.data, get_order(buf.len));
+	kfree(tmp.data);
+	kfree(buf.data);
 	return error;
 }
 

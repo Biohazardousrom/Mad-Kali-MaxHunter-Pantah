@@ -32,6 +32,7 @@ struct ipv6_devconf {
 	__s32		max_desync_factor;
 	__s32		max_addresses;
 	__s32		accept_ra_defrtr;
+	__u32		ra_defrtr_metric;
 	__s32		accept_ra_min_hop_limit;
 	__s32		accept_ra_pinfo;
 	__s32		ignore_routes_with_linkdown;
@@ -62,6 +63,7 @@ struct ipv6_devconf {
 	__s32		suppress_frag_ndisc;
 	__s32		accept_ra_mtu;
 	__s32		drop_unsolicited_na;
+	__s32		accept_untracked_na;
 	struct ipv6_stable_secret {
 		bool initialized;
 		struct in6_addr secret;
@@ -77,6 +79,10 @@ struct ipv6_devconf {
 	__s32		disable_policy;
 	__s32           ndisc_tclass;
 	__s32		rpl_seg_enabled;
+	__u32		ioam6_id;
+	__u32		ioam6_id_wide;
+	__u8		ioam6_enabled;
+	__u8		ndisc_evict_nocarrier;
 
 	struct ctl_table_header *sysctl_header;
 
@@ -136,6 +142,7 @@ struct inet6_skb_parm {
 	__u16			dsthao;
 #endif
 	__u16			frag_max_size;
+	__u16			srhoff;
 
 #define IP6SKB_XFRM_TRANSFORMED	1
 #define IP6SKB_FORWARDED	2
@@ -145,6 +152,9 @@ struct inet6_skb_parm {
 #define IP6SKB_HOPBYHOP        32
 #define IP6SKB_L3SLAVE         64
 #define IP6SKB_JUMBOGRAM      128
+#define IP6SKB_SEG6	      256
+#define IP6SKB_FAKEJUMBO      512
+#define IP6SKB_MULTIPATH      1024
 };
 
 #if defined(CONFIG_NET_L3_MASTER_DEV)
@@ -286,7 +296,6 @@ struct ipv6_pinfo {
 	__be32			rcv_flowinfo;
 
 	__u32			dst_cookie;
-	__u32			rx_dst_cookie;
 
 	struct ipv6_mc_socklist	__rcu *ipv6_mc_list;
 	struct ipv6_ac_socklist	*ipv6_ac_list;
@@ -341,8 +350,7 @@ static inline struct raw6_sock *raw6_sk(const struct sock *sk)
 	return (struct raw6_sock *)sk;
 }
 
-#define __ipv6_only_sock(sk)	(sk->sk_ipv6only)
-#define ipv6_only_sock(sk)	(__ipv6_only_sock(sk))
+#define ipv6_only_sock(sk)	(sk->sk_ipv6only)
 #define ipv6_sk_rxinfo(sk)	((sk)->sk_family == PF_INET6 && \
 				 inet6_sk(sk)->rxopt.bits.rxinfo)
 
@@ -359,7 +367,6 @@ static inline int inet_v6_ipv6only(const struct sock *sk)
 	return ipv6_only_sock(sk);
 }
 #else
-#define __ipv6_only_sock(sk)	0
 #define ipv6_only_sock(sk)	0
 #define ipv6_sk_rxinfo(sk)	0
 
@@ -373,19 +380,12 @@ static inline struct ipv6_pinfo * inet6_sk(const struct sock *__sk)
 	return NULL;
 }
 
-static inline struct inet6_request_sock *
-			inet6_rsk(const struct request_sock *rsk)
-{
-	return NULL;
-}
-
 static inline struct raw6_sock *raw6_sk(const struct sock *sk)
 {
 	return NULL;
 }
 
 #define inet6_rcv_saddr(__sk)	NULL
-#define tcp_twsk_ipv6only(__sk)		0
 #define inet_v6_ipv6only(__sk)		0
 #endif /* IS_ENABLED(CONFIG_IPV6) */
 #endif /* _IPV6_H */

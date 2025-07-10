@@ -19,7 +19,7 @@ struct tlb_inv_context {
 static void enter_vmid_context(struct kvm_s2_mmu *mmu,
 			       struct tlb_inv_context *cxt)
 {
-	struct kvm_s2_mmu *host_mmu = &host_kvm.arch.mmu;
+	struct kvm_s2_mmu *host_s2_mmu = &host_mmu.arch.mmu;
 	struct kvm_cpu_context *host_ctxt;
 	struct kvm_vcpu *vcpu;
 
@@ -33,16 +33,16 @@ static void enter_vmid_context(struct kvm_s2_mmu *mmu,
 	 */
 	if (vcpu) {
 		/* We're in guest context */
-		if (mmu == vcpu->arch.hw_mmu || WARN_ON(mmu != host_mmu))
+		if (mmu == vcpu->arch.hw_mmu || WARN_ON(mmu != host_s2_mmu))
 			return;
 
 		cxt->mmu = vcpu->arch.hw_mmu;
 	} else {
 		/* We're in host context */
-		if (mmu == host_mmu)
+		if (mmu == host_s2_mmu)
 			return;
 
-		cxt->mmu = host_mmu;
+		cxt->mmu = host_s2_mmu;
 	}
 
 	if (cpus_have_final_cap(ARM64_WORKAROUND_SPECULATIVE_AT)) {
@@ -106,10 +106,10 @@ static void exit_vmid_context(struct tlb_inv_context *cxt)
 	else
 		__load_host_stage2();
 
-	if (cpus_have_final_cap(ARM64_WORKAROUND_SPECULATIVE_AT)) {
-		/* Ensure write of the old VMID */
-		isb();
+	/* Ensure write of the old VMID */
+	isb();
 
+	if (cpus_have_final_cap(ARM64_WORKAROUND_SPECULATIVE_AT)) {
 		if (!(cxt->sctlr & SCTLR_ELx_M)) {
 			write_sysreg_el1(cxt->sctlr, SYS_SCTLR);
 			isb();

@@ -833,7 +833,6 @@ static struct i2c_driver adm1275_driver = {
 		   .name = "adm1275",
 		   },
 	.probe_new = adm1275_probe,
-	.remove = pmbus_do_remove,
 	.id_table = adm1275_id,
 };
 
@@ -842,3 +841,4 @@ module_i2c_driver(adm1275_driver);
 MODULE_AUTHOR("Guenter Roeck");
 MODULE_DESCRIPTION("PMBus driver for Analog Devices ADM1275 and compatibles");
 MODULE_LICENSE("GPL");
+MODULE_IMPORT_NS(PMBUS);

@@ -20,6 +20,8 @@
 #define PAGE_SIZE	_PAGE_SIZE
 #define PAGE_MASK	_PAGE_MASK
 #define PAGE_DEFAULT_ACC	0
+/* storage-protection override */
+#define PAGE_SPO_ACC		9
 #define PAGE_DEFAULT_KEY	(PAGE_DEFAULT_ACC << 4)
 
 #define HPAGE_SHIFT	20
@@ -55,13 +57,16 @@ static inline void storage_key_init_range(unsigned long start, unsigned long end
  */
 static inline void copy_page(void *to, void *from)
 {
-	register void *reg2 asm ("2") = to;
-	register unsigned long reg3 asm ("3") = 0x1000;
-	register void *reg4 asm ("4") = from;
-	register unsigned long reg5 asm ("5") = 0xb0001000;
+	union register_pair dst, src;
+
+	dst.even = (unsigned long) to;
+	dst.odd  = 0x1000;
+	src.even = (unsigned long) from;
+	src.odd  = 0xb0001000;
+
 	asm volatile(
-		"	mvcl	2,4"
-		: "+d" (reg2), "+d" (reg3), "+d" (reg4), "+d" (reg5)
+		"	mvcl	%[dst],%[src]"
+		: [dst] "+&d" (dst.pair), [src] "+&d" (src.pair)
 		: : "memory", "cc");
 }
 
@@ -87,11 +92,31 @@ typedef pte_t *pgtable_t;
 
 #define pgprot_val(x)	((x).pgprot)
 #define pgste_val(x)	((x).pgste)
-#define pte_val(x)	((x).pte)
-#define pmd_val(x)	((x).pmd)
-#define pud_val(x)	((x).pud)
-#define p4d_val(x)	((x).p4d)
-#define pgd_val(x)      ((x).pgd)
+
+static inline unsigned long pte_val(pte_t pte)
+{
+	return pte.pte;
+}
+
+static inline unsigned long pmd_val(pmd_t pmd)
+{
+	return pmd.pmd;
+}
+
+static inline unsigned long pud_val(pud_t pud)
+{
+	return pud.pud;
+}
+
+static inline unsigned long p4d_val(p4d_t p4d)
+{
+	return p4d.p4d;
+}
+
+static inline unsigned long pgd_val(pgd_t pgd)
+{
+	return pgd.pgd;
+}
 
 #define __pgste(x)	((pgste_t) { (x) } )
 #define __pte(x)        ((pte_t) { (x) } )
@@ -141,9 +166,6 @@ struct page;
 void arch_free_page(struct page *page, int order);
 void arch_alloc_page(struct page *page, int order);
 void arch_set_page_dat(struct page *page, int order);
-void arch_set_page_nodat(struct page *page, int order);
-int arch_test_page_nodat(struct page *page);
-void arch_set_page_states(int make_stable);
 
 static inline int devmem_is_allowed(unsigned long pfn)
 {

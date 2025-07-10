@@ -24,46 +24,7 @@
  *  Author: Vincent Guittot <vincent.guittot@linaro.org>
  */
 
-#include <linux/sched.h>
-#include "sched.h"
-#include "pelt.h"
-
-int pelt_load_avg_period = PELT32_LOAD_AVG_PERIOD;
-int pelt_load_avg_max = PELT32_LOAD_AVG_MAX;
-EXPORT_SYMBOL_GPL(pelt_load_avg_max);
-const u32 *pelt_runnable_avg_yN_inv = pelt32_runnable_avg_yN_inv;
-
-static int __init set_pelt(char *str)
-{
-	int rc, num;
-
-	rc = kstrtoint(str, 0, &num);
-	if (rc) {
-		pr_err("%s: kstrtoint failed. rc=%d\n", __func__, rc);
-		return 0;
-	}
-
-	switch (num) {
-	case PELT8_LOAD_AVG_PERIOD:
-		pelt_load_avg_period = PELT8_LOAD_AVG_PERIOD;
-		pelt_load_avg_max = PELT8_LOAD_AVG_MAX;
-		pelt_runnable_avg_yN_inv = pelt8_runnable_avg_yN_inv;
-		pr_info("PELT half life is set to %dms\n", num);
-		break;
-	case PELT32_LOAD_AVG_PERIOD:
-		pelt_load_avg_period = PELT32_LOAD_AVG_PERIOD;
-		pelt_load_avg_max = PELT32_LOAD_AVG_MAX;
-		pelt_runnable_avg_yN_inv = pelt32_runnable_avg_yN_inv;
-		pr_info("PELT half life is set to %dms\n", num);
-		break;
-	default:
-		pr_err("Default PELT half life is 32ms\n");
-	}
-
-	return 0;
-}
-
-early_param("pelt", set_pelt);
+#include <trace/hooks/sched.h>
 
 /*
  * Approximate:
@@ -91,7 +52,7 @@ static u64 decay_load(u64 val, u64 n)
 		local_n %= LOAD_AVG_PERIOD;
 	}
 
-	val = mul_u64_u32_shr(val, pelt_runnable_avg_yN_inv[local_n], 32);
+	val = mul_u64_u32_shr(val, runnable_avg_yN_inv[local_n], 32);
 	return val;
 }
 
@@ -170,7 +131,7 @@ accumulate_sum(u64 delta, struct sched_avg *sa,
 			 *	runnable = running = 0;
 			 *
 			 * clause from ___update_load_sum(); this results in
-			 * the below usage of @contrib to dissapear entirely,
+			 * the below usage of @contrib to disappear entirely,
 			 * so no point in calculating it.
 			 */
 			contrib = __accumulate_pelt_segments(periods,
@@ -217,8 +178,9 @@ accumulate_sum(u64 delta, struct sched_avg *sa,
  *   load_avg = u_0` + y*(u_0 + u_1*y + u_2*y^2 + ... )
  *            = u_0 + u_1*y + u_2*y^2 + ... [re-labeling u_i --> u_{i+1}]
  */
-int ___update_load_sum(u64 now, struct sched_avg *sa,
-		       unsigned long load, unsigned long runnable, int running)
+int
+___update_load_sum(u64 now, struct sched_avg *sa,
+		  unsigned long load, unsigned long runnable, int running)
 {
 	u64 delta;
 
@@ -241,6 +203,8 @@ int ___update_load_sum(u64 now, struct sched_avg *sa,
 		return 0;
 
 	sa->last_update_time += delta << 10;
+
+	trace_android_rvh_update_load_sum(sa, &delta, &sched_pelt_lshift);
 
 	/*
 	 * running is a subset of runnable (weight) so running can't be set if
@@ -294,7 +258,8 @@ EXPORT_SYMBOL_GPL(___update_load_sum);
  * the period_contrib of cfs_rq when updating the sched_avg of a sched_entity
  * if it's more convenient.
  */
-void ___update_load_avg(struct sched_avg *sa, unsigned long load)
+void
+___update_load_avg(struct sched_avg *sa, unsigned long load)
 {
 	u32 divider = get_pelt_divider(sa);
 
@@ -510,10 +475,11 @@ int update_irq_load_avg(struct rq *rq, u64 running)
 }
 #endif
 
-DEFINE_PER_CPU(u64, clock_task_mult);
-
-unsigned int sysctl_sched_pelt_multiplier = 1;
 __read_mostly unsigned int sched_pelt_lshift;
+
+#ifdef CONFIG_SYSCTL
+#include <trace/hooks/sched.h>
+static unsigned int sysctl_sched_pelt_multiplier = 1;
 
 int sched_pelt_multiplier(struct ctl_table *table, int write, void *buffer,
 			  size_t *lenp, loff_t *ppos)
@@ -523,13 +489,16 @@ int sched_pelt_multiplier(struct ctl_table *table, int write, void *buffer,
 	int ret;
 
 	mutex_lock(&mutex);
-
 	old = sysctl_sched_pelt_multiplier;
 	ret = proc_dointvec(table, write, buffer, lenp, ppos);
 	if (ret)
 		goto undo;
 	if (!write)
 		goto done;
+
+	trace_android_vh_sched_pelt_multiplier(old, sysctl_sched_pelt_multiplier, &ret);
+	if (ret)
+		goto undo;
 
 	switch (sysctl_sched_pelt_multiplier)  {
 	case 1:
@@ -551,3 +520,22 @@ done:
 
 	return ret;
 }
+
+static struct ctl_table sched_pelt_sysctls[] = {
+	{
+		.procname       = "sched_pelt_multiplier",
+		.data           = &sysctl_sched_pelt_multiplier,
+		.maxlen         = sizeof(unsigned int),
+		.mode           = 0644,
+		.proc_handler   = sched_pelt_multiplier,
+	},
+	{}
+};
+
+static int __init sched_pelt_sysctl_init(void)
+{
+	register_sysctl_init("kernel", sched_pelt_sysctls);
+	return 0;
+}
+late_initcall(sched_pelt_sysctl_init);
+#endif

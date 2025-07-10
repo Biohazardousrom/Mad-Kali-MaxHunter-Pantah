@@ -94,7 +94,7 @@
  *         Remove APM dependencies in arch/i386/kernel/process.c
  *         Remove APM dependencies in drivers/char/sysrq.c
  *         Reset time across standby.
- *         Allow more inititialisation on SMP.
+ *         Allow more initialisation on SMP.
  *         Remove CONFIG_APM_POWER_OFF and make it boot time
  *         configurable (default on).
  *         Make debug only a boot time parameter (remove APM_DEBUG).
@@ -232,6 +232,7 @@
 #include <asm/paravirt.h>
 #include <asm/reboot.h>
 #include <asm/nospec-branch.h>
+#include <asm/ibt.h>
 
 #if defined(CONFIG_APM_DISPLAY_BLANK) && defined(CONFIG_VT)
 extern int (*console_blank_hook)(int);
@@ -592,6 +593,7 @@ static long __apm_bios_call(void *_call)
 	struct desc_struct	save_desc_40;
 	struct desc_struct	*gdt;
 	struct apm_bios_call	*call = _call;
+	u64			ibt;
 
 	cpu = get_cpu();
 	BUG_ON(cpu != 0);
@@ -601,11 +603,13 @@ static long __apm_bios_call(void *_call)
 
 	apm_irq_save(flags);
 	firmware_restrict_branch_speculation_start();
+	ibt = ibt_save();
 	APM_DO_SAVE_SEGS;
 	apm_bios_call_asm(call->func, call->ebx, call->ecx,
 			  &call->eax, &call->ebx, &call->ecx, &call->edx,
 			  &call->esi);
 	APM_DO_RESTORE_SEGS;
+	ibt_restore(ibt);
 	firmware_restrict_branch_speculation_end();
 	apm_irq_restore(flags);
 	gdt[0x40 / 8] = save_desc_40;
@@ -670,6 +674,7 @@ static long __apm_bios_call_simple(void *_call)
 	struct desc_struct	save_desc_40;
 	struct desc_struct	*gdt;
 	struct apm_bios_call	*call = _call;
+	u64			ibt;
 
 	cpu = get_cpu();
 	BUG_ON(cpu != 0);
@@ -679,10 +684,12 @@ static long __apm_bios_call_simple(void *_call)
 
 	apm_irq_save(flags);
 	firmware_restrict_branch_speculation_start();
+	ibt = ibt_save();
 	APM_DO_SAVE_SEGS;
 	error = apm_bios_call_simple_asm(call->func, call->ebx, call->ecx,
 					 &call->eax);
 	APM_DO_RESTORE_SEGS;
+	ibt_restore(ibt);
 	firmware_restrict_branch_speculation_end();
 	apm_irq_restore(flags);
 	gdt[0x40 / 8] = save_desc_40;
@@ -760,7 +767,7 @@ static int apm_driver_version(u_short *val)
  *	not cleared until it is acknowledged.
  *
  *	Additional information is returned in the info pointer, providing
- *	that APM 1.2 is in use. If no messges are pending the value 0x80
+ *	that APM 1.2 is in use. If no messages are pending the value 0x80
  *	is returned (No power management events pending).
  */
 static int apm_get_event(apm_event_t *event, apm_eventinfo_t *info)
@@ -1019,7 +1026,7 @@ static int apm_enable_power_management(int enable)
  *	status which gives the rough battery status, and current power
  *	source. The bat value returned give an estimate as a percentage
  *	of life and a status value for the battery. The estimated life
- *	if reported is a lifetime in secodnds/minutes at current powwer
+ *	if reported is a lifetime in seconds/minutes at current power
  *	consumption.
  */
 

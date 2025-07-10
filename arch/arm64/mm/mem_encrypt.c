@@ -18,6 +18,36 @@
 
 #include <asm/hypervisor.h>
 
+#ifndef ARM_SMCCC_KVM_FUNC_HYP_MEMINFO
+#define ARM_SMCCC_KVM_FUNC_HYP_MEMINFO	2
+
+#define ARM_SMCCC_VENDOR_HYP_KVM_HYP_MEMINFO_FUNC_ID			\
+	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL,				\
+			   ARM_SMCCC_SMC_64,				\
+			   ARM_SMCCC_OWNER_VENDOR_HYP,			\
+			   ARM_SMCCC_KVM_FUNC_HYP_MEMINFO)
+#endif	/* ARM_SMCCC_KVM_FUNC_HYP_MEMINFO */
+
+#ifndef ARM_SMCCC_KVM_FUNC_MEM_SHARE
+#define ARM_SMCCC_KVM_FUNC_MEM_SHARE	3
+
+#define ARM_SMCCC_VENDOR_HYP_KVM_MEM_SHARE_FUNC_ID			\
+	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL,				\
+			   ARM_SMCCC_SMC_64,				\
+			   ARM_SMCCC_OWNER_VENDOR_HYP,			\
+			   ARM_SMCCC_KVM_FUNC_MEM_SHARE)
+#endif	/* ARM_SMCCC_KVM_FUNC_MEM_SHARE */
+
+#ifndef ARM_SMCCC_KVM_FUNC_MEM_UNSHARE
+#define ARM_SMCCC_KVM_FUNC_MEM_UNSHARE	4
+
+#define ARM_SMCCC_VENDOR_HYP_KVM_MEM_UNSHARE_FUNC_ID			\
+	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL,				\
+			   ARM_SMCCC_SMC_64,				\
+			   ARM_SMCCC_OWNER_VENDOR_HYP,			\
+			   ARM_SMCCC_KVM_FUNC_MEM_UNSHARE)
+#endif	/* ARM_SMCCC_KVM_FUNC_MEM_UNSHARE */
+
 static unsigned long memshare_granule_sz;
 
 bool mem_encrypt_active(void)
@@ -91,6 +121,7 @@ int set_memory_encrypted(unsigned long addr, int numpages)
 	return set_memory_xcrypted(ARM_SMCCC_VENDOR_HYP_KVM_MEM_UNSHARE_FUNC_ID,
 				   addr, numpages);
 }
+EXPORT_SYMBOL_GPL(set_memory_encrypted);
 
 int set_memory_decrypted(unsigned long addr, int numpages)
 {
@@ -100,3 +131,4 @@ int set_memory_decrypted(unsigned long addr, int numpages)
 	return set_memory_xcrypted(ARM_SMCCC_VENDOR_HYP_KVM_MEM_SHARE_FUNC_ID,
 				   addr, numpages);
 }
+EXPORT_SYMBOL_GPL(set_memory_decrypted);

@@ -13,12 +13,24 @@
 
 #define KVM_PGTABLE_MAX_LEVELS		4U
 
+/*
+ * The largest supported block sizes for KVM (no 52-bit PA support):
+ *  - 4K (level 1):	1GB
+ *  - 16K (level 2):	32MB
+ *  - 64K (level 2):	512MB
+ */
+#ifdef CONFIG_ARM64_4K_PAGES
+#define KVM_PGTABLE_MIN_BLOCK_LEVEL	1U
+#else
+#define KVM_PGTABLE_MIN_BLOCK_LEVEL	2U
+#endif
+
 static inline u64 kvm_get_parange(u64 mmfr0)
 {
 	u64 parange = cpuid_feature_extract_unsigned_field(mmfr0,
-				ID_AA64MMFR0_PARANGE_SHIFT);
-	if (parange > ID_AA64MMFR0_PARANGE_MAX)
-		parange = ID_AA64MMFR0_PARANGE_MAX;
+				ID_AA64MMFR0_EL1_PARANGE_SHIFT);
+	if (parange > ID_AA64MMFR0_EL1_PARANGE_MAX)
+		parange = ID_AA64MMFR0_EL1_PARANGE_MAX;
 
 	return parange;
 }
@@ -29,6 +41,41 @@ typedef u64 kvm_pte_t;
 
 #define KVM_PTE_ADDR_MASK		GENMASK(47, PAGE_SHIFT)
 #define KVM_PTE_ADDR_51_48		GENMASK(15, 12)
+
+#define KVM_PHYS_INVALID		(-1ULL)
+
+#define KVM_PTE_TYPE			BIT(1)
+#define KVM_PTE_TYPE_BLOCK		0
+#define KVM_PTE_TYPE_PAGE		1
+#define KVM_PTE_TYPE_TABLE		1
+
+#define KVM_PTE_LEAF_ATTR_LO		GENMASK(11, 2)
+
+#define KVM_PTE_LEAF_ATTR_LO_S1_ATTRIDX	GENMASK(4, 2)
+#define KVM_PTE_LEAF_ATTR_LO_S1_AP	GENMASK(7, 6)
+#define KVM_PTE_LEAF_ATTR_LO_S1_AP_RO	3
+#define KVM_PTE_LEAF_ATTR_LO_S1_AP_RW	1
+#define KVM_PTE_LEAF_ATTR_LO_S1_SH	GENMASK(9, 8)
+#define KVM_PTE_LEAF_ATTR_LO_S1_SH_IS	3
+#define KVM_PTE_LEAF_ATTR_LO_S1_AF	BIT(10)
+
+#define KVM_PTE_LEAF_ATTR_LO_S2_MEMATTR	GENMASK(5, 2)
+#define KVM_PTE_LEAF_ATTR_LO_S2_S2AP_R	BIT(6)
+#define KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W	BIT(7)
+#define KVM_PTE_LEAF_ATTR_LO_S2_SH	GENMASK(9, 8)
+#define KVM_PTE_LEAF_ATTR_LO_S2_SH_IS	3
+#define KVM_PTE_LEAF_ATTR_LO_S2_AF	BIT(10)
+
+#define KVM_PTE_LEAF_ATTR_HI		GENMASK(63, 51)
+
+#define KVM_PTE_LEAF_ATTR_HI_SW		GENMASK(58, 55)
+
+#define KVM_PTE_LEAF_ATTR_HI_S1_XN	BIT(54)
+
+#define KVM_PTE_LEAF_ATTR_HI_S2_XN_PXN	1
+#define KVM_PTE_LEAF_ATTR_HI_S2_XN_UXN	3
+#define KVM_PTE_LEAF_ATTR_HI_S2_XN_XN	2
+#define KVM_PTE_LEAF_ATTR_HI_S2_XN	GENMASK(54, 53)
 
 static inline bool kvm_pte_valid(kvm_pte_t pte)
 {
@@ -45,6 +92,18 @@ static inline u64 kvm_pte_to_phys(kvm_pte_t pte)
 	return pa;
 }
 
+static inline kvm_pte_t kvm_phys_to_pte(u64 pa)
+{
+	kvm_pte_t pte = pa & KVM_PTE_ADDR_MASK;
+
+	if (PAGE_SHIFT == 16) {
+		pa &= GENMASK(51, 48);
+		pte |= FIELD_PREP(KVM_PTE_ADDR_51_48, pa >> 48);
+	}
+
+	return pte;
+}
+
 static inline u64 kvm_granule_shift(u32 level)
 {
 	/* Assumes KVM_PGTABLE_MAX_LEVELS is 4 */
@@ -58,11 +117,18 @@ static inline u64 kvm_granule_size(u32 level)
 
 static inline bool kvm_level_supports_block_mapping(u32 level)
 {
-	/*
-	 * Reject invalid block mappings and don't bother with 4TB mappings for
-	 * 52-bit PAs.
-	 */
-	return !(level == 0 || (PAGE_SIZE != SZ_4K && level == 1));
+	return level >= KVM_PGTABLE_MIN_BLOCK_LEVEL;
+}
+
+static inline bool kvm_pte_table(kvm_pte_t pte, u32 level)
+{
+	if (level == KVM_PGTABLE_MAX_LEVELS - 1)
+		return false;
+
+	if (!kvm_pte_valid(pte))
+		return false;
+
+	return FIELD_GET(KVM_PTE_TYPE, pte) == KVM_PTE_TYPE_TABLE;
 }
 
 /**
@@ -104,6 +170,11 @@ struct kvm_pgtable_mm_ops {
 	void		(*icache_inval_pou)(void *addr, size_t size);
 };
 
+static inline kvm_pte_t *kvm_pte_follow(kvm_pte_t pte, struct kvm_pgtable_mm_ops *mm_ops)
+{
+	return mm_ops->phys_to_virt(kvm_pte_to_phys(pte));
+}
+
 /**
  * enum kvm_pgtable_stage2_flags - Stage-2 page-table flags.
  * @KVM_PGTABLE_S2_NOFWB:	Don't enforce Normal-WB even if the CPUs have
@@ -121,6 +192,9 @@ enum kvm_pgtable_stage2_flags {
  * @KVM_PGTABLE_PROT_W:		Write permission.
  * @KVM_PGTABLE_PROT_R:		Read permission.
  * @KVM_PGTABLE_PROT_DEVICE:	Device attributes.
+ * @KVM_PGTABLE_PROT_NC:	Normal non-cacheable attributes.
+ * @KVM_PGTABLE_PROT_PXN:	Privileged execute-never.
+ * @KVM_PGTABLE_PROT_UXN:	Unprivileged execute-never.
  * @KVM_PGTABLE_PROT_SW0:	Software bit 0.
  * @KVM_PGTABLE_PROT_SW1:	Software bit 1.
  * @KVM_PGTABLE_PROT_SW2:	Software bit 2.
@@ -132,6 +206,9 @@ enum kvm_pgtable_prot {
 	KVM_PGTABLE_PROT_R			= BIT(2),
 
 	KVM_PGTABLE_PROT_DEVICE			= BIT(3),
+	KVM_PGTABLE_PROT_NC			= BIT(4),
+	KVM_PGTABLE_PROT_PXN			= BIT(5),
+	KVM_PGTABLE_PROT_UXN			= BIT(6),
 
 	KVM_PGTABLE_PROT_SW0			= BIT(55),
 	KVM_PGTABLE_PROT_SW1			= BIT(56),
@@ -145,6 +222,20 @@ enum kvm_pgtable_prot {
 #define PKVM_HOST_MEM_PROT	KVM_PGTABLE_PROT_RWX
 #define PKVM_HOST_MMIO_PROT	KVM_PGTABLE_PROT_RW
 
+#define KVM_HOST_S2_DEFAULT_MASK   (KVM_PTE_LEAF_ATTR_HI |	\
+				    KVM_PTE_LEAF_ATTR_LO)
+
+#define KVM_HOST_S2_DEFAULT_MEM_PTE		\
+	(PTE_S2_MEMATTR(MT_S2_NORMAL) |		\
+	KVM_PTE_LEAF_ATTR_LO_S2_S2AP_R |	\
+	KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W |	\
+	KVM_PTE_LEAF_ATTR_LO_S2_AF |		\
+	FIELD_PREP(KVM_PTE_LEAF_ATTR_LO_S2_SH, KVM_PTE_LEAF_ATTR_LO_S2_SH_IS))
+
+#define KVM_HOST_S2_DEFAULT_MMIO_PTE		\
+	(KVM_HOST_S2_DEFAULT_MEM_PTE |		\
+	FIELD_PREP(KVM_PTE_LEAF_ATTR_HI_S2_XN, KVM_PTE_LEAF_ATTR_HI_S2_XN_XN))
+
 #define PAGE_HYP		KVM_PGTABLE_PROT_RW
 #define PAGE_HYP_EXEC		(KVM_PGTABLE_PROT_R | KVM_PGTABLE_PROT_X)
 #define PAGE_HYP_RO		(KVM_PGTABLE_PROT_R)
@@ -152,6 +243,22 @@ enum kvm_pgtable_prot {
 
 typedef bool (*kvm_pgtable_force_pte_cb_t)(u64 addr, u64 end,
 					   enum kvm_pgtable_prot prot);
+
+typedef bool (*kvm_pgtable_pte_is_counted_cb_t)(kvm_pte_t pte, u32 level);
+
+/**
+ * struct kvm_pgtable_pte_ops - PTE callbacks.
+ * @force_pte_cb:		Force the mapping granularity to pages and
+ *				return true if we support this instead of
+ *				block mappings.
+ * @pte_is_counted_cb		Verify the attributes of the @pte argument
+ *				and return true if the descriptor needs to be
+ *				refcounted, otherwise return false.
+ */
+struct kvm_pgtable_pte_ops {
+	kvm_pgtable_force_pte_cb_t		force_pte_cb;
+	kvm_pgtable_pte_is_counted_cb_t		pte_is_counted_cb;
+};
 
 /**
  * struct kvm_pgtable - KVM page-table.
@@ -161,8 +268,7 @@ typedef bool (*kvm_pgtable_force_pte_cb_t)(u64 addr, u64 end,
  * @mm_ops:		Memory management callbacks.
  * @mmu:		Stage-2 KVM MMU struct. Unused for stage-1 page-tables.
  * @flags:		Stage-2 page-table flags.
- * @force_pte_cb:	Function that returns true if page level mappings must
- *			be used instead of block mappings.
+ * @pte_ops:		PTE callbacks.
  */
 struct kvm_pgtable {
 	u32					ia_bits;
@@ -173,7 +279,7 @@ struct kvm_pgtable {
 	/* Stage-2 only */
 	struct kvm_s2_mmu			*mmu;
 	enum kvm_pgtable_stage2_flags		flags;
-	kvm_pgtable_force_pte_cb_t		force_pte_cb;
+	struct kvm_pgtable_pte_ops		*pte_ops;
 };
 
 /**
@@ -288,7 +394,7 @@ u64 kvm_pgtable_hyp_unmap(struct kvm_pgtable *pgt, u64 addr, u64 size);
  */
 u64 kvm_get_vtcr(u64 mmfr0, u64 mmfr1, u32 phys_shift);
 
-/*
+/**
  * kvm_pgtable_stage2_pgd_size() - Helper to compute size of a stage-2 PGD
  * @vtcr:	Content of the VTCR register.
  *
@@ -302,18 +408,17 @@ size_t kvm_pgtable_stage2_pgd_size(u64 vtcr);
  * @mmu:	S2 MMU context for this S2 translation
  * @mm_ops:	Memory management callbacks.
  * @flags:	Stage-2 configuration flags.
- * @force_pte_cb: Function that returns true if page level mappings must
- *		be used instead of block mappings.
+ * @pte_ops:	PTE callbacks.
  *
  * Return: 0 on success, negative error code on failure.
  */
 int __kvm_pgtable_stage2_init(struct kvm_pgtable *pgt, struct kvm_s2_mmu *mmu,
 			      struct kvm_pgtable_mm_ops *mm_ops,
 			      enum kvm_pgtable_stage2_flags flags,
-			      kvm_pgtable_force_pte_cb_t force_pte_cb);
+			      struct kvm_pgtable_pte_ops *pte_ops);
 
-#define kvm_pgtable_stage2_init(pgt, mmu, mm_ops) \
-	__kvm_pgtable_stage2_init(pgt, mmu, mm_ops, 0, NULL)
+#define kvm_pgtable_stage2_init(pgt, mmu, mm_ops, pte_ops) \
+	__kvm_pgtable_stage2_init(pgt, mmu, mm_ops, 0, pte_ops)
 
 /**
  * kvm_pgtable_stage2_destroy() - Destroy an unused guest stage-2 page-table.
@@ -396,6 +501,21 @@ int kvm_pgtable_stage2_annotate(struct kvm_pgtable *pgt, u64 addr, u64 size,
  * Return: 0 on success, negative error code on failure.
  */
 int kvm_pgtable_stage2_unmap(struct kvm_pgtable *pgt, u64 addr, u64 size);
+
+/**
+ * kvm_pgtable_stage2_reclaim_leaves() - Attempt to reclaim leaf page-table
+ *					 pages by coalescing table entries into
+ *					 block mappings.
+ * @pgt:	Page-table structure initialised by kvm_pgtable_stage2_init*().
+ * @addr:	Intermediate physical address from which to reclaim leaves.
+ * @size:	Size of the range.
+ *
+ * The offset of @addr within a page is ignored and @size is rounded-up to
+ * the next page boundary.
+ *
+ * Return: 0 on success, negative error code on failure.
+ */
+int kvm_pgtable_stage2_reclaim_leaves(struct kvm_pgtable *pgt, u64 addr, u64 size);
 
 /**
  * kvm_pgtable_stage2_wrprotect() - Write-protect guest stage-2 address range

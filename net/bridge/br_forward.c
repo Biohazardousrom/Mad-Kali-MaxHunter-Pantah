@@ -39,8 +39,7 @@ int br_dev_queue_push_xmit(struct net *net, struct sock *sk, struct sk_buff *skb
 	br_drop_fake_rtable(skb);
 
 	if (skb->ip_summed == CHECKSUM_PARTIAL &&
-	    (skb->protocol == htons(ETH_P_8021Q) ||
-	     skb->protocol == htons(ETH_P_8021AD))) {
+	    eth_type_vlan(skb->protocol)) {
 		int depth;
 
 		if (!vlan_get_protocol_and_depth(skb, skb->protocol, &depth))
@@ -48,6 +47,8 @@ int br_dev_queue_push_xmit(struct net *net, struct sock *sk, struct sk_buff *skb
 
 		skb_set_network_header(skb, depth);
 	}
+
+	br_switchdev_frame_set_offload_fwd_mark(skb);
 
 	dev_queue_xmit(skb);
 
@@ -61,7 +62,7 @@ EXPORT_SYMBOL_GPL(br_dev_queue_push_xmit);
 
 int br_forward_finish(struct net *net, struct sock *sk, struct sk_buff *skb)
 {
-	skb->tstamp = 0;
+	skb_clear_tstamp(skb);
 	return NF_HOOK(NFPROTO_BRIDGE, NF_BR_POST_ROUTING,
 		       net, sk, skb, NULL, skb->dev,
 		       br_dev_queue_push_xmit);
@@ -76,6 +77,11 @@ static void __br_forward(const struct net_bridge_port *to,
 	struct net_device *indev;
 	struct net *net;
 	int br_hook;
+
+	/* Mark the skb for forwarding offload early so that br_handle_vlan()
+	 * can know whether to pop the VLAN header on egress or keep it.
+	 */
+	nbp_switchdev_frame_mark_tx_fwd_offload(to, skb);
 
 	vg = nbp_vlan_group_rcu(to);
 	skb = br_handle_vlan(to->br, to, vg, skb);
@@ -118,7 +124,7 @@ static int deliver_clone(const struct net_bridge_port *prev,
 
 	skb = skb_clone(skb, GFP_ATOMIC);
 	if (!skb) {
-		dev->stats.tx_dropped++;
+		DEV_STATS_INC(dev, tx_dropped);
 		return -ENOMEM;
 	}
 
@@ -174,6 +180,8 @@ static struct net_bridge_port *maybe_deliver(
 
 	if (!should_deliver(p, skb))
 		return prev;
+
+	nbp_switchdev_frame_mark_tx_fwd_to_hwdom(p, skb);
 
 	if (!prev)
 		goto out;
@@ -245,6 +253,7 @@ static void maybe_deliver_addr(struct net_bridge_port *p, struct sk_buff *skb,
 {
 	struct net_device *dev = BR_INPUT_SKB_CB(skb)->brdev;
 	const unsigned char *src = eth_hdr(skb)->h_source;
+	struct sk_buff *nskb;
 
 	if (!should_deliver(p, skb))
 		return;
@@ -253,12 +262,16 @@ static void maybe_deliver_addr(struct net_bridge_port *p, struct sk_buff *skb,
 	if (skb->dev == p->dev && ether_addr_equal(src, addr))
 		return;
 
-	skb = skb_copy(skb, GFP_ATOMIC);
-	if (!skb) {
-		dev->stats.tx_dropped++;
+	__skb_push(skb, ETH_HLEN);
+	nskb = pskb_copy(skb, GFP_ATOMIC);
+	__skb_pull(skb, ETH_HLEN);
+	if (!nskb) {
+		DEV_STATS_INC(dev, tx_dropped);
 		return;
 	}
 
+	skb = nskb;
+	__skb_pull(skb, ETH_HLEN);
 	if (!is_broadcast_ether_addr(addr))
 		memcpy(eth_hdr(skb)->h_dest, addr, ETH_ALEN);
 
@@ -268,19 +281,19 @@ static void maybe_deliver_addr(struct net_bridge_port *p, struct sk_buff *skb,
 /* called with rcu_read_lock */
 void br_multicast_flood(struct net_bridge_mdb_entry *mdst,
 			struct sk_buff *skb,
+			struct net_bridge_mcast *brmctx,
 			bool local_rcv, bool local_orig)
 {
-	struct net_device *dev = BR_INPUT_SKB_CB(skb)->brdev;
-	struct net_bridge *br = netdev_priv(dev);
 	struct net_bridge_port *prev = NULL;
 	struct net_bridge_port_group *p;
 	bool allow_mode_include = true;
 	struct hlist_node *rp;
 
-	rp = rcu_dereference(hlist_first_rcu(&br->router_list));
+	rp = br_multicast_get_first_rport_node(brmctx, skb);
+
 	if (mdst) {
 		p = rcu_dereference(mdst->ports);
-		if (br_multicast_should_handle_mode(br, mdst->addr.proto) &&
+		if (br_multicast_should_handle_mode(brmctx, mdst->addr.proto) &&
 		    br_multicast_is_star_g(&mdst->addr))
 			allow_mode_include = false;
 	} else {
@@ -291,7 +304,7 @@ void br_multicast_flood(struct net_bridge_mdb_entry *mdst,
 		struct net_bridge_port *port, *lport, *rport;
 
 		lport = p ? p->key.port : NULL;
-		rport = hlist_entry_safe(rp, struct net_bridge_port, rlist);
+		rport = br_multicast_rport_from_node_skb(rp, skb);
 
 		if ((unsigned long)lport > (unsigned long)rport) {
 			port = lport;

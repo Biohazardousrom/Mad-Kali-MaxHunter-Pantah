@@ -18,6 +18,7 @@
 #include <linux/klist.h>
 #include <linux/pm.h>
 #include <linux/device/bus.h>
+#include <linux/module.h>
 
 /**
  * enum probe_type - device driver probe type to try
@@ -75,7 +76,7 @@ enum probe_type {
  * @resume:	Called to bring a device from sleep mode.
  * @groups:	Default attributes that get created by the driver core
  *		automatically.
- * @dev_groups:	Additional attributes attached to device instance once the
+ * @dev_groups:	Additional attributes attached to device instance once
  *		it is bound to the driver.
  * @pm:		Power management operations of the device which matched
  *		this driver.
@@ -133,6 +134,8 @@ extern struct device_driver *driver_find(const char *name,
 					 struct bus_type *bus);
 extern int driver_probe_done(void);
 extern void wait_for_device_probe(void);
+extern void flush_deferred_probe_now(void);
+void __init wait_for_init_devices_probe(void);
 
 /* sysfs interface for exporting driver attributes */
 

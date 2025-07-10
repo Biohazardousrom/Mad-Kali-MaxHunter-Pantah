@@ -14,14 +14,21 @@
  * don't need to meet these requirements.
  */
 
+/*
+ * Since this .c file is the real entry point of fips140.ko, it needs to be
+ * compiled normally, so undo the hacks that were done in fips140-defs.h.
+ */
+#define MODULE
+#undef KBUILD_MODFILE
 #undef __DISABLE_EXPORTS
 
 #include <linux/ctype.h>
+#include <linux/debugfs.h>
 #include <linux/module.h>
 #include <crypto/aead.h>
 #include <crypto/aes.h>
 #include <crypto/hash.h>
-#include <crypto/sha.h>
+#include <crypto/sha2.h>
 #include <crypto/skcipher.h>
 #include <crypto/rng.h>
 #include <trace/hooks/fips140.h>
@@ -291,6 +298,10 @@ static void __init unapply_text_relocations(void *section, int section_size,
 
 		switch (ELF64_R_TYPE(rela->r_info)) {
 #ifdef CONFIG_ARM64
+		case R_AARCH64_ABS32: /* for KCFI */
+			*place = 0;
+			break;
+
 		case R_AARCH64_JUMP26:
 		case R_AARCH64_CALL26:
 			*place &= ~GENMASK(25, 0);
@@ -347,6 +358,94 @@ static void __init unapply_rodata_relocations(void *section, int section_size,
 	}
 }
 
+enum {
+	PACIASP		= 0xd503233f,
+	AUTIASP		= 0xd50323bf,
+	SCS_PUSH	= 0xf800865e,
+	SCS_POP		= 0xf85f8e5e,
+};
+
+/*
+ * To make the integrity check work with dynamic Shadow Call Stack (SCS),
+ * replace all instructions that push or pop from the SCS with the Pointer
+ * Authentication Code (PAC) instructions that were present originally.
+ */
+static void __init unapply_scs_patch(void *section, int section_size)
+{
+#if defined(CONFIG_ARM64) && defined(CONFIG_UNWIND_PATCH_PAC_INTO_SCS)
+	u32 *insns = section;
+	int i;
+
+	for (i = 0; i < section_size / sizeof(insns[0]); i++) {
+		if (insns[i] == SCS_PUSH)
+			insns[i] = PACIASP;
+		else if (insns[i] == SCS_POP)
+			insns[i] = AUTIASP;
+	}
+#endif
+}
+
+#ifdef CONFIG_CRYPTO_FIPS140_MOD_DEBUG_INTEGRITY_CHECK
+static struct {
+	const void *text;
+	int textsize;
+	const void *rodata;
+	int rodatasize;
+} saved_integrity_check_info;
+
+static ssize_t fips140_text_read(struct file *file, char __user *to,
+				 size_t count, loff_t *ppos)
+{
+	return simple_read_from_buffer(to, count, ppos,
+				       saved_integrity_check_info.text,
+				       saved_integrity_check_info.textsize);
+}
+
+static ssize_t fips140_rodata_read(struct file *file, char __user *to,
+				   size_t count, loff_t *ppos)
+{
+	return simple_read_from_buffer(to, count, ppos,
+				       saved_integrity_check_info.rodata,
+				       saved_integrity_check_info.rodatasize);
+}
+
+static const struct file_operations fips140_text_fops = {
+	.read = fips140_text_read,
+};
+
+static const struct file_operations fips140_rodata_fops = {
+	.read = fips140_rodata_read,
+};
+
+static void fips140_init_integrity_debug_files(const void *text, int textsize,
+					       const void *rodata,
+					       int rodatasize)
+{
+	struct dentry *dir;
+
+	dir = debugfs_create_dir("fips140", NULL);
+
+	saved_integrity_check_info.text = kmemdup(text, textsize, GFP_KERNEL);
+	saved_integrity_check_info.textsize = textsize;
+	if (saved_integrity_check_info.text)
+		debugfs_create_file("text", 0400, dir, NULL,
+				    &fips140_text_fops);
+
+	saved_integrity_check_info.rodata = kmemdup(rodata, rodatasize,
+						    GFP_KERNEL);
+	saved_integrity_check_info.rodatasize = rodatasize;
+	if (saved_integrity_check_info.rodata)
+		debugfs_create_file("rodata", 0400, dir, NULL,
+				    &fips140_rodata_fops);
+}
+#else /* CONFIG_CRYPTO_FIPS140_MOD_DEBUG_INTEGRITY_CHECK */
+static void fips140_init_integrity_debug_files(const void *text, int textsize,
+					       const void *rodata,
+					       int rodatasize)
+{
+}
+#endif /* !CONFIG_CRYPTO_FIPS140_MOD_DEBUG_INTEGRITY_CHECK */
+
 extern struct {
 	u32	offset;
 	u32	count;
@@ -387,6 +486,11 @@ static bool __init check_fips140_module_hmac(void)
 	unapply_rodata_relocations(rodatacopy, rodatasize,
 				  offset_to_ptr(&fips140_rela_rodata.offset),
 				  fips140_rela_rodata.count);
+
+	unapply_scs_patch(textcopy, textsize);
+
+	fips140_init_integrity_debug_files(textcopy, textsize,
+					   rodatacopy, rodatasize);
 
 	fips140_inject_integrity_failure(textcopy);
 
@@ -477,18 +581,8 @@ static bool update_fips140_library_routines(void)
 	return ret == 0;
 }
 
-/*
- * Initialize the FIPS 140 module.
- *
- * Note: this routine iterates over the contents of the initcall section, which
- * consists of an array of function pointers that was emitted by the linker
- * rather than the compiler. This means that these function pointers lack the
- * usual CFI stubs that the compiler emits when CFI codegen is enabled. So
- * let's disable CFI locally when handling the initcall array, to avoid
- * surpises.
- */
-static int __init __attribute__((__no_sanitize__("cfi")))
-fips140_init(void)
+/* Initialize the FIPS 140 module */
+static int __init fips140_init(void)
 {
 	const u32 *initcall;
 
@@ -501,7 +595,7 @@ fips140_init(void)
 	for (initcall = __initcall_start + 1;
 	     initcall < &__initcall_end_marker;
 	     initcall++) {
-		int (*init)(void) = offset_to_ptr(initcall);
+		initcall_t init = offset_to_ptr(initcall);
 		int err = init();
 
 		/*
@@ -528,10 +622,14 @@ fips140_init(void)
 	 */
 
 	if (!check_fips140_module_hmac()) {
-		pr_crit("integrity check failed -- giving up!\n");
-		goto panic;
+		if (!IS_ENABLED(CONFIG_CRYPTO_FIPS140_MOD_DEBUG_INTEGRITY_CHECK)) {
+			pr_crit("integrity check failed -- giving up!\n");
+			goto panic;
+		}
+		pr_crit("ignoring integrity check failure due to debug mode\n");
+	} else {
+		pr_info("integrity check passed\n");
 	}
-	pr_info("integrity check passed\n");
 
 	complete_all(&fips140_tests_done);
 
@@ -554,50 +652,48 @@ MODULE_IMPORT_NS(CRYPTO_INTERNAL);
 MODULE_LICENSE("GPL v2");
 
 /*
- * Crypto-related helper functions, reproduced here so that they will be
- * covered by the FIPS 140 integrity check.
+ * Below are copies of some selected "crypto-related" helper functions that are
+ * used by fips140.ko but are not already built into it, due to them being
+ * defined in a file that cannot easily be built into fips140.ko (e.g.,
+ * crypto/algapi.c) instead of one that can (e.g., most files in lib/).
  *
- * Non-cryptographic helper functions such as memcpy() can be excluded from the
- * FIPS module, but there is ambiguity about other helper functions like
- * __crypto_xor() and crypto_inc() which aren't cryptographic by themselves,
- * but are more closely associated with cryptography than e.g. memcpy(). To
- * err on the side of caution, we include copies of these in the FIPS module.
+ * There is no hard rule about what needs to be included here, as this is for
+ * FIPS certifiability, not any technical reason.  FIPS modules are supposed to
+ * implement the "crypto" themselves, but to do so they are allowed to call
+ * non-cryptographic helper functions from outside the module.  Something like
+ * memcpy() is "clearly" non-cryptographic.  However, there is is ambiguity
+ * about functions like crypto_inc() which aren't cryptographic by themselves,
+ * but are more closely associated with cryptography than e.g. memcpy().  To err
+ * on the side of caution, we define copies of some selected functions below so
+ * that calls to them from within fips140.ko will remain in fips140.ko.
  */
-void __crypto_xor(u8 *dst, const u8 *src1, const u8 *src2, unsigned int len)
+
+static inline void crypto_inc_byte(u8 *a, unsigned int size)
 {
-	while (len >= 8) {
-		*(u64 *)dst = *(u64 *)src1 ^  *(u64 *)src2;
-		dst += 8;
-		src1 += 8;
-		src2 += 8;
-		len -= 8;
-	}
+	u8 *b = (a + size);
+	u8 c;
 
-	while (len >= 4) {
-		*(u32 *)dst = *(u32 *)src1 ^ *(u32 *)src2;
-		dst += 4;
-		src1 += 4;
-		src2 += 4;
-		len -= 4;
+	for (; size; size--) {
+		c = *--b + 1;
+		*b = c;
+		if (c)
+			break;
 	}
-
-	while (len >= 2) {
-		*(u16 *)dst = *(u16 *)src1 ^ *(u16 *)src2;
-		dst += 2;
-		src1 += 2;
-		src2 += 2;
-		len -= 2;
-	}
-
-	while (len--)
-		*dst++ = *src1++ ^ *src2++;
 }
 
 void crypto_inc(u8 *a, unsigned int size)
 {
-	a += size;
+	__be32 *b = (__be32 *)(a + size);
+	u32 c;
 
-	while (size--)
-		if (++*--a)
-			break;
+	if (IS_ENABLED(CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS) ||
+	    IS_ALIGNED((unsigned long)b, __alignof__(*b)))
+		for (; size >= 4; size -= 4) {
+			c = be32_to_cpu(*--b) + 1;
+			*b = cpu_to_be32(c);
+			if (likely(c))
+				return;
+		}
+
+	crypto_inc_byte(a, size);
 }

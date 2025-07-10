@@ -13,13 +13,16 @@
 #include <asm/kvm_emulate.h>
 #include <asm/kvm_host.h>
 #include <asm/kvm_hyp.h>
+#include <asm/kvm_hypevents.h>
 #include <asm/kvm_mmu.h>
 
 #include <nvhe/ffa.h>
 #include <nvhe/iommu.h>
 #include <nvhe/mem_protect.h>
+#include <nvhe/modules.h>
 #include <nvhe/mm.h>
 #include <nvhe/pkvm.h>
+#include <nvhe/trace.h>
 #include <nvhe/trap_handler.h>
 
 #include <linux/irqchip/arm-gic-v3.h>
@@ -27,49 +30,52 @@
 
 #include "../../sys_regs.h"
 
-struct pkvm_loaded_state {
-	/* loaded vcpu is HYP VA */
-	struct kvm_vcpu			*vcpu;
-	bool				is_protected;
-
-	/*
-	 * Host FPSIMD state. Written to when the guest accesses its
-	 * own FPSIMD state, and read when the guest state is live and
-	 * that it needs to be switched back to the host.
-	 *
-	 * Only valid when the KVM_ARM64_FP_ENABLED flag is set in the
-	 * shadow structure.
-	 */
-	struct user_fpsimd_state	host_fpsimd_state;
-};
-
-static DEFINE_PER_CPU(struct pkvm_loaded_state, loaded_state);
-
 DEFINE_PER_CPU(struct kvm_nvhe_init_params, kvm_init_params);
 
 void __kvm_hyp_host_forward_smc(struct kvm_cpu_context *host_ctxt);
 
-typedef void (*shadow_entry_exit_handler_fn)(struct kvm_vcpu *, struct kvm_vcpu *);
+static bool (*default_host_smc_handler)(struct kvm_cpu_context *host_ctxt);
+static bool (*default_trap_handler)(struct kvm_cpu_context *host_ctxt);
 
-static void handle_pvm_entry_wfx(struct kvm_vcpu *host_vcpu, struct kvm_vcpu *shadow_vcpu)
+int __pkvm_register_host_smc_handler(bool (*cb)(struct kvm_cpu_context *))
 {
-	shadow_vcpu->arch.flags |= host_vcpu->arch.flags & KVM_ARM64_INCREMENT_PC;
+	/*
+	 * Paired with smp_load_acquire(&default_host_smc_handler) in
+	 * handle_host_smc(). Ensure memory stores happening during a pKVM module
+	 * init are observed before executing the callback.
+	 */
+	return cmpxchg_release(&default_host_smc_handler, NULL, cb) ? -EBUSY : 0;
 }
 
-static int pkvm_refill_memcache(struct kvm_vcpu *shadow_vcpu,
-				struct kvm_vcpu *host_vcpu)
+int __pkvm_register_default_trap_handler(bool (*cb)(struct kvm_cpu_context *))
 {
-	u64 nr_pages;
+	return cmpxchg(&default_trap_handler, NULL, cb) ? -EBUSY : 0;
+}
 
-	nr_pages = VTCR_EL2_LVLS(shadow_vcpu->arch.pkvm.shadow_vm->arch.vtcr) - 1;
-	return refill_memcache(&shadow_vcpu->arch.pkvm_memcache, nr_pages,
+static int pkvm_refill_memcache(struct pkvm_hyp_vcpu *hyp_vcpu)
+{
+	struct pkvm_hyp_vm *hyp_vm = pkvm_hyp_vcpu_to_hyp_vm(hyp_vcpu);
+	u64 nr_pages = VTCR_EL2_LVLS(hyp_vm->kvm.arch.vtcr) - 1;
+	struct kvm_vcpu *host_vcpu = hyp_vcpu->host_vcpu;
+
+	return refill_memcache(&hyp_vcpu->vcpu.arch.pkvm_memcache, nr_pages,
 			       &host_vcpu->arch.pkvm_memcache);
 }
 
-static void handle_pvm_entry_psci(struct kvm_vcpu *host_vcpu, struct kvm_vcpu *shadow_vcpu)
+typedef void (*hyp_entry_exit_handler_fn)(struct pkvm_hyp_vcpu *);
+
+static void handle_pvm_entry_wfx(struct pkvm_hyp_vcpu *hyp_vcpu)
 {
-	u32 psci_fn = smccc_get_function(shadow_vcpu);
-	u64 ret = vcpu_get_reg(host_vcpu, 0);
+	if (vcpu_get_flag(hyp_vcpu->host_vcpu, INCREMENT_PC)) {
+		vcpu_clear_flag(&hyp_vcpu->vcpu, PC_UPDATE_REQ);
+		kvm_incr_pc(&hyp_vcpu->vcpu);
+	}
+}
+
+static void handle_pvm_entry_psci(struct pkvm_hyp_vcpu *hyp_vcpu)
+{
+	u32 psci_fn = smccc_get_function(&hyp_vcpu->vcpu);
+	u64 ret = READ_ONCE(hyp_vcpu->host_vcpu->arch.ctxt.regs.regs[0]);
 
 	switch (psci_fn) {
 	case PSCI_0_2_FN_CPU_ON:
@@ -82,88 +88,82 @@ static void handle_pvm_entry_psci(struct kvm_vcpu *host_vcpu, struct kvm_vcpu *s
 		 * off.
 		 */
 		if (ret != PSCI_RET_SUCCESS) {
-			struct kvm_shadow_vm *vm = shadow_vcpu->arch.pkvm.shadow_vm;
-			unsigned long cpu_id = smccc_get_arg1(shadow_vcpu);
-			struct kvm_vcpu *vcpu = pvm_mpidr_to_vcpu(vm, cpu_id);
+			unsigned long cpu_id = smccc_get_arg1(&hyp_vcpu->vcpu);
+			struct pkvm_hyp_vcpu *target_vcpu;
+			struct pkvm_hyp_vm *hyp_vm;
 
-			if (vcpu && READ_ONCE(vcpu->arch.pkvm.power_state) == PSCI_0_2_AFFINITY_LEVEL_ON_PENDING)
-				WRITE_ONCE(vcpu->arch.pkvm.power_state, PSCI_0_2_AFFINITY_LEVEL_OFF);
+			hyp_vm = pkvm_hyp_vcpu_to_hyp_vm(hyp_vcpu);
+			target_vcpu = pkvm_mpidr_to_hyp_vcpu(hyp_vm, cpu_id);
+
+			if (target_vcpu && READ_ONCE(target_vcpu->power_state) == PSCI_0_2_AFFINITY_LEVEL_ON_PENDING)
+				WRITE_ONCE(target_vcpu->power_state, PSCI_0_2_AFFINITY_LEVEL_OFF);
 
 			ret = PSCI_RET_INTERNAL_FAILURE;
 		}
+
 		break;
 	default:
 		break;
 	}
 
-	vcpu_set_reg(shadow_vcpu, 0, ret);
+	vcpu_set_reg(&hyp_vcpu->vcpu, 0, ret);
 }
 
-static void handle_pvm_entry_hvc64(struct kvm_vcpu *host_vcpu, struct kvm_vcpu *shadow_vcpu)
+static void handle_pvm_entry_hvc64(struct pkvm_hyp_vcpu *hyp_vcpu)
 {
-	u32 fn = smccc_get_function(shadow_vcpu);
+	u32 fn = smccc_get_function(&hyp_vcpu->vcpu);
 
 	switch (fn) {
 	case ARM_SMCCC_VENDOR_HYP_KVM_MMIO_GUARD_MAP_FUNC_ID:
-		pkvm_refill_memcache(shadow_vcpu, host_vcpu);
+		pkvm_refill_memcache(hyp_vcpu);
 		break;
 	case ARM_SMCCC_VENDOR_HYP_KVM_MEM_SHARE_FUNC_ID:
 		fallthrough;
 	case ARM_SMCCC_VENDOR_HYP_KVM_MEM_UNSHARE_FUNC_ID:
-		vcpu_set_reg(shadow_vcpu, 0, SMCCC_RET_SUCCESS);
+		fallthrough;
+	case ARM_SMCCC_VENDOR_HYP_KVM_MEM_RELINQUISH_FUNC_ID:
+		vcpu_set_reg(&hyp_vcpu->vcpu, 0, SMCCC_RET_SUCCESS);
 		break;
 	default:
-		handle_pvm_entry_psci(host_vcpu, shadow_vcpu);
+		handle_pvm_entry_psci(hyp_vcpu);
 		break;
 	}
 }
 
-static void handle_pvm_entry_sys64(struct kvm_vcpu *host_vcpu, struct kvm_vcpu *shadow_vcpu)
+static void handle_pvm_entry_sys64(struct pkvm_hyp_vcpu *hyp_vcpu)
 {
-	unsigned long host_flags;
-
-	host_flags = READ_ONCE(host_vcpu->arch.flags);
+	struct kvm_vcpu *host_vcpu = hyp_vcpu->host_vcpu;
 
 	/* Exceptions have priority on anything else */
-	if (host_flags & KVM_ARM64_PENDING_EXCEPTION) {
+	if (vcpu_get_flag(host_vcpu, PENDING_EXCEPTION)) {
 		/* Exceptions caused by this should be undef exceptions. */
 		u32 esr = (ESR_ELx_EC_UNKNOWN << ESR_ELx_EC_SHIFT);
 
-		__vcpu_sys_reg(shadow_vcpu, ESR_EL1) = esr;
-		shadow_vcpu->arch.flags &= ~(KVM_ARM64_PENDING_EXCEPTION |
-					     KVM_ARM64_EXCEPT_MASK);
-		shadow_vcpu->arch.flags |= (KVM_ARM64_PENDING_EXCEPTION |
-					    KVM_ARM64_EXCEPT_AA64_ELx_SYNC |
-					    KVM_ARM64_EXCEPT_AA64_EL1);
-
+		__vcpu_sys_reg(&hyp_vcpu->vcpu, ESR_EL1) = esr;
+		kvm_pend_exception(&hyp_vcpu->vcpu, EXCEPT_AA64_EL1_SYNC);
 		return;
 	}
 
-
-	if (host_flags & KVM_ARM64_INCREMENT_PC) {
-		shadow_vcpu->arch.flags &= ~(KVM_ARM64_PENDING_EXCEPTION |
-					     KVM_ARM64_EXCEPT_MASK);
-		shadow_vcpu->arch.flags |= KVM_ARM64_INCREMENT_PC;
+	if (vcpu_get_flag(host_vcpu, INCREMENT_PC)) {
+		vcpu_clear_flag(&hyp_vcpu->vcpu, PC_UPDATE_REQ);
+		kvm_incr_pc(&hyp_vcpu->vcpu);
 	}
 
-	if (!esr_sys64_to_params(shadow_vcpu->arch.fault.esr_el2).is_write) {
+	if (!esr_sys64_to_params(hyp_vcpu->vcpu.arch.fault.esr_el2).is_write) {
 		/* r0 as transfer register between the guest and the host. */
-		u64 rt_val = vcpu_get_reg(host_vcpu, 0);
-		int rt = kvm_vcpu_sys_get_rt(shadow_vcpu);
+		u64 rt_val = READ_ONCE(host_vcpu->arch.ctxt.regs.regs[0]);
+		int rt = kvm_vcpu_sys_get_rt(&hyp_vcpu->vcpu);
 
-		vcpu_set_reg(shadow_vcpu, rt, rt_val);
+		vcpu_set_reg(&hyp_vcpu->vcpu, rt, rt_val);
 	}
 }
 
-static void handle_pvm_entry_iabt(struct kvm_vcpu *host_vcpu, struct kvm_vcpu *shadow_vcpu)
+static void handle_pvm_entry_iabt(struct pkvm_hyp_vcpu *hyp_vcpu)
 {
-	unsigned long cpsr = *vcpu_cpsr(shadow_vcpu);
-	unsigned long host_flags;
+	unsigned long cpsr = *vcpu_cpsr(&hyp_vcpu->vcpu);
 	u32 esr = ESR_ELx_IL;
 
-	host_flags = READ_ONCE(host_vcpu->arch.flags);
-
-	if (!(host_flags & KVM_ARM64_PENDING_EXCEPTION))
+	if (!vcpu_get_flag(hyp_vcpu->host_vcpu, PENDING_EXCEPTION))
 		return;
 
 	/*
@@ -177,27 +177,22 @@ static void handle_pvm_entry_iabt(struct kvm_vcpu *host_vcpu, struct kvm_vcpu *s
 
 	esr |= ESR_ELx_FSC_EXTABT;
 
-	__vcpu_sys_reg(shadow_vcpu, ESR_EL1) = esr;
-	__vcpu_sys_reg(shadow_vcpu, FAR_EL1) = kvm_vcpu_get_hfar(shadow_vcpu);
+	__vcpu_sys_reg(&hyp_vcpu->vcpu, ESR_EL1) = esr;
+	__vcpu_sys_reg(&hyp_vcpu->vcpu, FAR_EL1) =
+		kvm_vcpu_get_hfar(&hyp_vcpu->vcpu);
 
 	/* Tell the run loop that we want to inject something */
-	shadow_vcpu->arch.flags &= ~(KVM_ARM64_PENDING_EXCEPTION |
-				     KVM_ARM64_EXCEPT_MASK);
-	shadow_vcpu->arch.flags |= (KVM_ARM64_PENDING_EXCEPTION |
-				    KVM_ARM64_EXCEPT_AA64_ELx_SYNC |
-				    KVM_ARM64_EXCEPT_AA64_EL1);
+	kvm_pend_exception(&hyp_vcpu->vcpu, EXCEPT_AA64_EL1_SYNC);
 }
 
-static void handle_pvm_entry_dabt(struct kvm_vcpu *host_vcpu, struct kvm_vcpu *shadow_vcpu)
+static void handle_pvm_entry_dabt(struct pkvm_hyp_vcpu *hyp_vcpu)
 {
-	unsigned long host_flags;
-	bool rd_update;
-
-	host_flags = READ_ONCE(host_vcpu->arch.flags);
+	struct kvm_vcpu *host_vcpu = hyp_vcpu->host_vcpu;
+	bool pc_update;
 
 	/* Exceptions have priority over anything else */
-	if (host_flags & KVM_ARM64_PENDING_EXCEPTION) {
-		unsigned long cpsr = *vcpu_cpsr(shadow_vcpu);
+	if (vcpu_get_flag(host_vcpu, PENDING_EXCEPTION)) {
+		unsigned long cpsr = *vcpu_cpsr(&hyp_vcpu->vcpu);
 		u32 esr = ESR_ELx_IL;
 
 		if ((cpsr & PSR_MODE_MASK) == PSR_MODE_EL0t)
@@ -207,53 +202,50 @@ static void handle_pvm_entry_dabt(struct kvm_vcpu *host_vcpu, struct kvm_vcpu *s
 
 		esr |= ESR_ELx_FSC_EXTABT;
 
-		__vcpu_sys_reg(shadow_vcpu, ESR_EL1) = esr;
-		__vcpu_sys_reg(shadow_vcpu, FAR_EL1) = kvm_vcpu_get_hfar(shadow_vcpu);
+		__vcpu_sys_reg(&hyp_vcpu->vcpu, ESR_EL1) = esr;
+		__vcpu_sys_reg(&hyp_vcpu->vcpu, FAR_EL1) =
+			kvm_vcpu_get_hfar(&hyp_vcpu->vcpu);
+
 		/* Tell the run loop that we want to inject something */
-		shadow_vcpu->arch.flags &= ~(KVM_ARM64_PENDING_EXCEPTION |
-					     KVM_ARM64_EXCEPT_MASK);
-		shadow_vcpu->arch.flags |= (KVM_ARM64_PENDING_EXCEPTION |
-					    KVM_ARM64_EXCEPT_AA64_ELx_SYNC |
-					    KVM_ARM64_EXCEPT_AA64_EL1);
+		kvm_pend_exception(&hyp_vcpu->vcpu, EXCEPT_AA64_EL1_SYNC);
 
 		/* Cancel potential in-flight MMIO */
-		shadow_vcpu->mmio_needed = false;
+		hyp_vcpu->vcpu.mmio_needed = false;
 		return;
 	}
 
 	/* Handle PC increment on MMIO */
-	if ((host_flags & KVM_ARM64_INCREMENT_PC) && shadow_vcpu->mmio_needed) {
-		shadow_vcpu->arch.flags &= ~(KVM_ARM64_PENDING_EXCEPTION |
-					     KVM_ARM64_EXCEPT_MASK);
-		shadow_vcpu->arch.flags |= KVM_ARM64_INCREMENT_PC;
+	pc_update = (hyp_vcpu->vcpu.mmio_needed &&
+		     vcpu_get_flag(host_vcpu, INCREMENT_PC));
+	if (pc_update) {
+		vcpu_clear_flag(&hyp_vcpu->vcpu, PC_UPDATE_REQ);
+		kvm_incr_pc(&hyp_vcpu->vcpu);
 	}
 
 	/* If we were doing an MMIO read access, update the register*/
-	rd_update = (shadow_vcpu->mmio_needed &&
-		     (host_flags & KVM_ARM64_INCREMENT_PC));
-	rd_update &= !kvm_vcpu_dabt_iswrite(shadow_vcpu);
-
-	if (rd_update) {
+	if (pc_update && !kvm_vcpu_dabt_iswrite(&hyp_vcpu->vcpu)) {
 		/* r0 as transfer register between the guest and the host. */
-		u64 rd_val = vcpu_get_reg(host_vcpu, 0);
-		int rd = kvm_vcpu_dabt_get_rd(shadow_vcpu);
+		u64 rd_val = READ_ONCE(host_vcpu->arch.ctxt.regs.regs[0]);
+		int rd = kvm_vcpu_dabt_get_rd(&hyp_vcpu->vcpu);
 
-		vcpu_set_reg(shadow_vcpu, rd, rd_val);
+		vcpu_set_reg(&hyp_vcpu->vcpu, rd, rd_val);
 	}
 
-	shadow_vcpu->mmio_needed = false;
+	hyp_vcpu->vcpu.mmio_needed = false;
 }
 
-static void handle_pvm_exit_wfx(struct kvm_vcpu *host_vcpu, struct kvm_vcpu *shadow_vcpu)
+static void handle_pvm_exit_wfx(struct pkvm_hyp_vcpu *hyp_vcpu)
 {
-	host_vcpu->arch.ctxt.regs.pstate = shadow_vcpu->arch.ctxt.regs.pstate &
-		PSR_MODE_MASK;
-	host_vcpu->arch.fault.esr_el2 = shadow_vcpu->arch.fault.esr_el2;
+	WRITE_ONCE(hyp_vcpu->host_vcpu->arch.ctxt.regs.pstate,
+		   hyp_vcpu->vcpu.arch.ctxt.regs.pstate & PSR_MODE_MASK);
+	WRITE_ONCE(hyp_vcpu->host_vcpu->arch.fault.esr_el2,
+		   hyp_vcpu->vcpu.arch.fault.esr_el2);
 }
 
-static void handle_pvm_exit_sys64(struct kvm_vcpu *host_vcpu, struct kvm_vcpu *shadow_vcpu)
+static void handle_pvm_exit_sys64(struct pkvm_hyp_vcpu *hyp_vcpu)
 {
-	u32 esr_el2 = shadow_vcpu->arch.fault.esr_el2;
+	struct kvm_vcpu *host_vcpu = hyp_vcpu->host_vcpu;
+	u32 esr_el2 = hyp_vcpu->vcpu.arch.fault.esr_el2;
 
 	/* r0 as transfer register between the guest and the host. */
 	WRITE_ONCE(host_vcpu->arch.fault.esr_el2,
@@ -261,21 +253,22 @@ static void handle_pvm_exit_sys64(struct kvm_vcpu *host_vcpu, struct kvm_vcpu *s
 
 	/* The mode is required for the host to emulate some sysregs */
 	WRITE_ONCE(host_vcpu->arch.ctxt.regs.pstate,
-		   shadow_vcpu->arch.ctxt.regs.pstate & PSR_MODE_MASK);
+		   hyp_vcpu->vcpu.arch.ctxt.regs.pstate & PSR_MODE_MASK);
 
 	if (esr_sys64_to_params(esr_el2).is_write) {
-		int rt = kvm_vcpu_sys_get_rt(shadow_vcpu);
-		u64 rt_val = vcpu_get_reg(shadow_vcpu, rt);
+		int rt = kvm_vcpu_sys_get_rt(&hyp_vcpu->vcpu);
+		u64 rt_val = vcpu_get_reg(&hyp_vcpu->vcpu, rt);
 
-		vcpu_set_reg(host_vcpu, 0, rt_val);
+		WRITE_ONCE(host_vcpu->arch.ctxt.regs.regs[0], rt_val);
 	}
 }
 
-static void handle_pvm_exit_hvc64(struct kvm_vcpu *host_vcpu, struct kvm_vcpu *shadow_vcpu)
+static void handle_pvm_exit_hvc64(struct pkvm_hyp_vcpu *hyp_vcpu)
 {
+	struct kvm_vcpu *host_vcpu = hyp_vcpu->host_vcpu;
 	int n, i;
 
-	switch (smccc_get_function(shadow_vcpu)) {
+	switch (smccc_get_function(&hyp_vcpu->vcpu)) {
 	/*
 	 * CPU_ON takes 3 arguments, however, to wake up the target vcpu the
 	 * host only needs to know the target's cpu_id, which is passed as the
@@ -297,12 +290,17 @@ static void handle_pvm_exit_hvc64(struct kvm_vcpu *host_vcpu, struct kvm_vcpu *s
 	case ARM_SMCCC_VENDOR_HYP_KVM_MEM_SHARE_FUNC_ID:
 		fallthrough;
 	case ARM_SMCCC_VENDOR_HYP_KVM_MEM_UNSHARE_FUNC_ID:
+		fallthrough;
+	case ARM_SMCCC_VENDOR_HYP_KVM_MEM_RELINQUISH_FUNC_ID:
 		n = 4;
+		break;
+
+	case ARM_SMCCC_VENDOR_HYP_KVM_MMIO_GUARD_MAP_FUNC_ID:
+		n = 3;
 		break;
 
 	case PSCI_1_1_FN_SYSTEM_RESET2:
 	case PSCI_1_1_FN64_SYSTEM_RESET2:
-	case ARM_SMCCC_VENDOR_HYP_KVM_MMIO_GUARD_MAP_FUNC_ID:
 		n = 3;
 		break;
 
@@ -314,77 +312,83 @@ static void handle_pvm_exit_hvc64(struct kvm_vcpu *host_vcpu, struct kvm_vcpu *s
 		BUG();
 	}
 
-	host_vcpu->arch.fault.esr_el2 = shadow_vcpu->arch.fault.esr_el2;
+	WRITE_ONCE(host_vcpu->arch.fault.esr_el2,
+		   hyp_vcpu->vcpu.arch.fault.esr_el2);
 
 	/* Pass the hvc function id (r0) as well as any potential arguments. */
-	for (i = 0; i < n; i++)
-		vcpu_set_reg(host_vcpu, i, vcpu_get_reg(shadow_vcpu, i));
+	for (i = 0; i < n; i++) {
+		WRITE_ONCE(host_vcpu->arch.ctxt.regs.regs[i],
+			   vcpu_get_reg(&hyp_vcpu->vcpu, i));
+	}
 }
 
-static void handle_pvm_exit_iabt(struct kvm_vcpu *host_vcpu, struct kvm_vcpu *shadow_vcpu)
+static void handle_pvm_exit_iabt(struct pkvm_hyp_vcpu *hyp_vcpu)
 {
-	WRITE_ONCE(host_vcpu->arch.fault.esr_el2,
-		   shadow_vcpu->arch.fault.esr_el2);
-	WRITE_ONCE(host_vcpu->arch.fault.hpfar_el2,
-		   shadow_vcpu->arch.fault.hpfar_el2);
+	WRITE_ONCE(hyp_vcpu->host_vcpu->arch.fault.esr_el2,
+		   hyp_vcpu->vcpu.arch.fault.esr_el2);
+	WRITE_ONCE(hyp_vcpu->host_vcpu->arch.fault.hpfar_el2,
+		   hyp_vcpu->vcpu.arch.fault.hpfar_el2);
 }
 
-static void handle_pvm_exit_dabt(struct kvm_vcpu *host_vcpu, struct kvm_vcpu *shadow_vcpu)
+static void handle_pvm_exit_dabt(struct pkvm_hyp_vcpu *hyp_vcpu)
 {
-	shadow_vcpu->mmio_needed = __pkvm_check_ioguard_page(shadow_vcpu);
+	struct kvm_vcpu *host_vcpu = hyp_vcpu->host_vcpu;
 
-	if (shadow_vcpu->mmio_needed) {
+	hyp_vcpu->vcpu.mmio_needed = __pkvm_check_ioguard_page(hyp_vcpu);
+
+	if (hyp_vcpu->vcpu.mmio_needed) {
 		/* r0 as transfer register between the guest and the host. */
 		WRITE_ONCE(host_vcpu->arch.fault.esr_el2,
-			   shadow_vcpu->arch.fault.esr_el2 & ~ESR_ELx_SRT_MASK);
+			   hyp_vcpu->vcpu.arch.fault.esr_el2 & ~ESR_ELx_SRT_MASK);
 
-		if (kvm_vcpu_dabt_iswrite(shadow_vcpu)) {
-			int rt = kvm_vcpu_dabt_get_rd(shadow_vcpu);
-			u64 rt_val = vcpu_get_reg(shadow_vcpu, rt);
+		if (kvm_vcpu_dabt_iswrite(&hyp_vcpu->vcpu)) {
+			int rt = kvm_vcpu_dabt_get_rd(&hyp_vcpu->vcpu);
+			u64 rt_val = vcpu_get_reg(&hyp_vcpu->vcpu, rt);
 
-			vcpu_set_reg(host_vcpu, 0, rt_val);
+			WRITE_ONCE(host_vcpu->arch.ctxt.regs.regs[0], rt_val);
 		}
 	} else {
 		WRITE_ONCE(host_vcpu->arch.fault.esr_el2,
-			   shadow_vcpu->arch.fault.esr_el2 & ~ESR_ELx_ISV);
+			   hyp_vcpu->vcpu.arch.fault.esr_el2 & ~ESR_ELx_ISV);
 	}
 
 	WRITE_ONCE(host_vcpu->arch.ctxt.regs.pstate,
-		   shadow_vcpu->arch.ctxt.regs.pstate & PSR_MODE_MASK);
+		   hyp_vcpu->vcpu.arch.ctxt.regs.pstate & PSR_MODE_MASK);
 	WRITE_ONCE(host_vcpu->arch.fault.far_el2,
-		   shadow_vcpu->arch.fault.far_el2 & FAR_MASK);
+		   hyp_vcpu->vcpu.arch.fault.far_el2 & GENMASK(11, 0));
 	WRITE_ONCE(host_vcpu->arch.fault.hpfar_el2,
-		   shadow_vcpu->arch.fault.hpfar_el2);
+		   hyp_vcpu->vcpu.arch.fault.hpfar_el2);
 	WRITE_ONCE(__vcpu_sys_reg(host_vcpu, SCTLR_EL1),
-		   __vcpu_sys_reg(shadow_vcpu, SCTLR_EL1) & (SCTLR_ELx_EE | SCTLR_EL1_E0E));
+		   __vcpu_sys_reg(&hyp_vcpu->vcpu, SCTLR_EL1) &
+			(SCTLR_ELx_EE | SCTLR_EL1_E0E));
 }
 
-static void handle_vm_entry_generic(struct kvm_vcpu *host_vcpu, struct kvm_vcpu *shadow_vcpu)
+static void handle_vm_entry_generic(struct pkvm_hyp_vcpu *hyp_vcpu)
 {
-	unsigned long host_flags = READ_ONCE(host_vcpu->arch.flags);
-
-	shadow_vcpu->arch.flags &= ~(KVM_ARM64_PENDING_EXCEPTION |
-				     KVM_ARM64_EXCEPT_MASK);
-
-	if (host_flags & KVM_ARM64_PENDING_EXCEPTION) {
-		shadow_vcpu->arch.flags |= KVM_ARM64_PENDING_EXCEPTION;
-		shadow_vcpu->arch.flags |= host_flags & KVM_ARM64_EXCEPT_MASK;
-	} else if (host_flags & KVM_ARM64_INCREMENT_PC) {
-		shadow_vcpu->arch.flags |= KVM_ARM64_INCREMENT_PC;
-	}
+	vcpu_copy_flag(&hyp_vcpu->vcpu, hyp_vcpu->host_vcpu, PC_UPDATE_REQ);
 }
 
-static void handle_vm_exit_generic(struct kvm_vcpu *host_vcpu, struct kvm_vcpu *shadow_vcpu)
+static void handle_vm_exit_generic(struct pkvm_hyp_vcpu *hyp_vcpu)
 {
-	host_vcpu->arch.fault.esr_el2 = shadow_vcpu->arch.fault.esr_el2;
+	WRITE_ONCE(hyp_vcpu->host_vcpu->arch.fault.esr_el2,
+		   hyp_vcpu->vcpu.arch.fault.esr_el2);
 }
 
-static void handle_vm_exit_abt(struct kvm_vcpu *host_vcpu, struct kvm_vcpu *shadow_vcpu)
+static void handle_vm_exit_abt(struct pkvm_hyp_vcpu *hyp_vcpu)
 {
-	host_vcpu->arch.fault = shadow_vcpu->arch.fault;
+	struct kvm_vcpu *host_vcpu = hyp_vcpu->host_vcpu;
+
+	WRITE_ONCE(host_vcpu->arch.fault.esr_el2,
+		   hyp_vcpu->vcpu.arch.fault.esr_el2);
+	WRITE_ONCE(host_vcpu->arch.fault.far_el2,
+		   hyp_vcpu->vcpu.arch.fault.far_el2);
+	WRITE_ONCE(host_vcpu->arch.fault.hpfar_el2,
+		   hyp_vcpu->vcpu.arch.fault.hpfar_el2);
+	WRITE_ONCE(host_vcpu->arch.fault.disr_el1,
+		   hyp_vcpu->vcpu.arch.fault.disr_el1);
 }
 
-static const shadow_entry_exit_handler_fn entry_pvm_shadow_handlers[] = {
+static const hyp_entry_exit_handler_fn entry_hyp_pvm_handlers[] = {
 	[0 ... ESR_ELx_EC_MAX]		= NULL,
 	[ESR_ELx_EC_WFx]		= handle_pvm_entry_wfx,
 	[ESR_ELx_EC_HVC64]		= handle_pvm_entry_hvc64,
@@ -393,7 +397,7 @@ static const shadow_entry_exit_handler_fn entry_pvm_shadow_handlers[] = {
 	[ESR_ELx_EC_DABT_LOW]		= handle_pvm_entry_dabt,
 };
 
-static const shadow_entry_exit_handler_fn exit_pvm_shadow_handlers[] = {
+static const hyp_entry_exit_handler_fn exit_hyp_pvm_handlers[] = {
 	[0 ... ESR_ELx_EC_MAX]		= NULL,
 	[ESR_ELx_EC_WFx]		= handle_pvm_exit_wfx,
 	[ESR_ELx_EC_HVC64]		= handle_pvm_exit_hvc64,
@@ -402,85 +406,85 @@ static const shadow_entry_exit_handler_fn exit_pvm_shadow_handlers[] = {
 	[ESR_ELx_EC_DABT_LOW]		= handle_pvm_exit_dabt,
 };
 
-static const shadow_entry_exit_handler_fn entry_vm_shadow_handlers[] = {
+static const hyp_entry_exit_handler_fn entry_hyp_vm_handlers[] = {
 	[0 ... ESR_ELx_EC_MAX]		= handle_vm_entry_generic,
 };
 
-static const shadow_entry_exit_handler_fn exit_vm_shadow_handlers[] = {
+static const hyp_entry_exit_handler_fn exit_hyp_vm_handlers[] = {
 	[0 ... ESR_ELx_EC_MAX]		= handle_vm_exit_generic,
 	[ESR_ELx_EC_IABT_LOW]		= handle_vm_exit_abt,
 	[ESR_ELx_EC_DABT_LOW]		= handle_vm_exit_abt,
 };
 
-static void flush_vgic_state(struct kvm_vcpu *host_vcpu,
-			     struct kvm_vcpu *shadow_vcpu)
+static void flush_hyp_vgic_state(struct pkvm_hyp_vcpu *hyp_vcpu)
 {
-	struct vgic_v3_cpu_if *host_cpu_if, *shadow_cpu_if;
+	struct kvm_vcpu *host_vcpu = hyp_vcpu->host_vcpu;
+	struct vgic_v3_cpu_if *host_cpu_if, *hyp_cpu_if;
 	unsigned int used_lrs, max_lrs, i;
 
 	host_cpu_if	= &host_vcpu->arch.vgic_cpu.vgic_v3;
-	shadow_cpu_if	= &shadow_vcpu->arch.vgic_cpu.vgic_v3;
+	hyp_cpu_if	= &hyp_vcpu->vcpu.arch.vgic_cpu.vgic_v3;
 
-	max_lrs = (read_gicreg(ICH_VTR_EL2) & 0xf) + 1;
-	used_lrs = READ_ONCE(host_cpu_if->used_lrs);
-	used_lrs = min(used_lrs, max_lrs);
+	max_lrs		= (read_gicreg(ICH_VTR_EL2) & 0xf) + 1;
+	used_lrs	= READ_ONCE(host_cpu_if->used_lrs);
+	used_lrs	= min(used_lrs, max_lrs);
 
-	shadow_cpu_if->vgic_hcr	= host_cpu_if->vgic_hcr;
+	hyp_cpu_if->vgic_hcr	= READ_ONCE(host_cpu_if->vgic_hcr);
 	/* Should be a one-off */
-	shadow_cpu_if->vgic_sre = (ICC_SRE_EL1_DIB |
+	hyp_cpu_if->vgic_sre	= (ICC_SRE_EL1_DIB |
 				   ICC_SRE_EL1_DFB |
 				   ICC_SRE_EL1_SRE);
-	shadow_cpu_if->used_lrs	= used_lrs;
+	hyp_cpu_if->used_lrs	= used_lrs;
 
 	for (i = 0; i < used_lrs; i++)
-		shadow_cpu_if->vgic_lr[i] = host_cpu_if->vgic_lr[i];
+		hyp_cpu_if->vgic_lr[i] = READ_ONCE(host_cpu_if->vgic_lr[i]);
 }
 
-static void sync_vgic_state(struct kvm_vcpu *host_vcpu,
-			    struct kvm_vcpu *shadow_vcpu)
+static void sync_hyp_vgic_state(struct pkvm_hyp_vcpu *hyp_vcpu)
 {
-	struct vgic_v3_cpu_if *host_cpu_if, *shadow_cpu_if;
+	struct kvm_vcpu *host_vcpu = hyp_vcpu->host_vcpu;
+	struct vgic_v3_cpu_if *host_cpu_if, *hyp_cpu_if;
 	unsigned int i;
 
 	host_cpu_if	= &host_vcpu->arch.vgic_cpu.vgic_v3;
-	shadow_cpu_if	= &shadow_vcpu->arch.vgic_cpu.vgic_v3;
+	hyp_cpu_if	= &hyp_vcpu->vcpu.arch.vgic_cpu.vgic_v3;
 
-	host_cpu_if->vgic_hcr	= shadow_cpu_if->vgic_hcr;
+	WRITE_ONCE(host_cpu_if->vgic_hcr, hyp_cpu_if->vgic_hcr);
 
-	for (i = 0; i < shadow_cpu_if->used_lrs; i++)
-		host_cpu_if->vgic_lr[i] = shadow_cpu_if->vgic_lr[i];
+	for (i = 0; i < hyp_cpu_if->used_lrs; i++)
+		WRITE_ONCE(host_cpu_if->vgic_lr[i], hyp_cpu_if->vgic_lr[i]);
 }
 
-static void flush_timer_state(struct pkvm_loaded_state *state)
+static void flush_hyp_timer_state(struct pkvm_hyp_vcpu *hyp_vcpu)
 {
-	struct kvm_vcpu *shadow_vcpu = state->vcpu;
-
-	if (!state->is_protected)
+	if (!pkvm_hyp_vcpu_is_protected(hyp_vcpu))
 		return;
 
 	/*
-	 * A shadow vcpu has no offset, and sees vtime == ptime. The
+	 * A hyp vcpu has no offset, and sees vtime == ptime. The
 	 * ptimer is fully emulated by EL1 and cannot be trusted.
 	 */
 	write_sysreg(0, cntvoff_el2);
 	isb();
-	write_sysreg_el0(__vcpu_sys_reg(shadow_vcpu, CNTV_CVAL_EL0), SYS_CNTV_CVAL);
-	write_sysreg_el0(__vcpu_sys_reg(shadow_vcpu, CNTV_CTL_EL0), SYS_CNTV_CTL);
+	write_sysreg_el0(__vcpu_sys_reg(&hyp_vcpu->vcpu, CNTV_CVAL_EL0),
+			 SYS_CNTV_CVAL);
+	write_sysreg_el0(__vcpu_sys_reg(&hyp_vcpu->vcpu, CNTV_CTL_EL0),
+			 SYS_CNTV_CTL);
 }
 
-static void sync_timer_state(struct pkvm_loaded_state *state)
+static void sync_hyp_timer_state(struct pkvm_hyp_vcpu *hyp_vcpu)
 {
-	struct kvm_vcpu *shadow_vcpu = state->vcpu;
-
-	if (!state->is_protected)
+	if (!pkvm_hyp_vcpu_is_protected(hyp_vcpu))
 		return;
 
 	/*
 	 * Preserve the vtimer state so that it is always correct,
 	 * even if the host tries to make a mess.
 	 */
-	__vcpu_sys_reg(shadow_vcpu, CNTV_CVAL_EL0) = read_sysreg_el0(SYS_CNTV_CVAL);
-	__vcpu_sys_reg(shadow_vcpu, CNTV_CTL_EL0) = read_sysreg_el0(SYS_CNTV_CTL);
+	__vcpu_sys_reg(&hyp_vcpu->vcpu, CNTV_CVAL_EL0) =
+		read_sysreg_el0(SYS_CNTV_CVAL);
+	__vcpu_sys_reg(&hyp_vcpu->vcpu, CNTV_CTL_EL0) =
+		read_sysreg_el0(SYS_CNTV_CTL);
 }
 
 static void __copy_vcpu_state(const struct kvm_vcpu *from_vcpu,
@@ -505,93 +509,146 @@ static void __copy_vcpu_state(const struct kvm_vcpu *from_vcpu,
 	}
 }
 
-static void __sync_vcpu_state(struct kvm_vcpu *shadow_vcpu)
+static void __sync_hyp_vcpu(struct pkvm_hyp_vcpu *hyp_vcpu)
 {
-	struct kvm_vcpu *host_vcpu = shadow_vcpu->arch.pkvm.host_vcpu;
-
-	__copy_vcpu_state(shadow_vcpu, host_vcpu);
+	__copy_vcpu_state(&hyp_vcpu->vcpu, hyp_vcpu->host_vcpu);
 }
 
-static void __flush_vcpu_state(struct kvm_vcpu *shadow_vcpu)
+static void __flush_hyp_vcpu(struct pkvm_hyp_vcpu *hyp_vcpu)
 {
-	struct kvm_vcpu *host_vcpu = shadow_vcpu->arch.pkvm.host_vcpu;
-
-	__copy_vcpu_state(host_vcpu, shadow_vcpu);
+	__copy_vcpu_state(hyp_vcpu->host_vcpu, &hyp_vcpu->vcpu);
 }
 
-static void flush_shadow_state(struct pkvm_loaded_state *state)
+static void flush_debug_state(struct pkvm_hyp_vcpu *hyp_vcpu)
 {
-	struct kvm_vcpu *shadow_vcpu = state->vcpu;
-	struct kvm_vcpu *host_vcpu = shadow_vcpu->arch.pkvm.host_vcpu;
-	u8 esr_ec;
-	shadow_entry_exit_handler_fn ec_handler;
+	struct kvm_vcpu *vcpu = &hyp_vcpu->vcpu;
+	struct kvm_vcpu *host_vcpu = hyp_vcpu->host_vcpu;
+	u64 mdcr_el2 = READ_ONCE(host_vcpu->arch.mdcr_el2);
 
 	/*
-	 * If we deal with a non-protected guest and that the state is
-	 * dirty (from a host perspective), copy the state back into
-	 * the shadow.
+	 * Propagate the monitor debug configuration of the vcpu from host.
+	 * Preserve HPMN, which is set-up by some knowledgeable bootcode.
+	 * Ensure that MDCR_EL2_E2PB_MASK and MDCR_EL2_E2TB_MASK are clear,
+	 * as guests should not be able to access profiling and trace buffers.
+	 * Ensure that RES0 bits are clear.
 	 */
-	if (!state->is_protected) {
-		if (READ_ONCE(host_vcpu->arch.flags) & KVM_ARM64_PKVM_STATE_DIRTY)
-			__flush_vcpu_state(shadow_vcpu);
+	mdcr_el2 &= ~(MDCR_EL2_RES0 |
+		      MDCR_EL2_HPMN_MASK |
+		      (MDCR_EL2_E2PB_MASK << MDCR_EL2_E2PB_SHIFT) |
+		      (MDCR_EL2_E2TB_MASK << MDCR_EL2_E2TB_SHIFT));
+	vcpu->arch.mdcr_el2 = read_sysreg(mdcr_el2) & MDCR_EL2_HPMN_MASK;
+	vcpu->arch.mdcr_el2 |= mdcr_el2;
 
-		state->vcpu->arch.hcr_el2 = HCR_GUEST_FLAGS & ~(HCR_RW | HCR_TWI | HCR_TWE);
-		state->vcpu->arch.hcr_el2 |= host_vcpu->arch.hcr_el2;
+	vcpu->arch.pmu = host_vcpu->arch.pmu;
+	vcpu->guest_debug = READ_ONCE(host_vcpu->guest_debug);
+
+	if (!kvm_vcpu_needs_debug_regs(vcpu))
+		return;
+
+	__vcpu_save_guest_debug_regs(vcpu);
+
+	/* Switch debug_ptr to the external_debug_state if done by the host. */
+	if (kern_hyp_va(READ_ONCE(host_vcpu->arch.debug_ptr)) ==
+	    &host_vcpu->arch.external_debug_state)
+		vcpu->arch.debug_ptr = &host_vcpu->arch.external_debug_state;
+
+	/* Propagate any special handling for single step from host. */
+	vcpu_write_sys_reg(vcpu, vcpu_read_sys_reg(host_vcpu, MDSCR_EL1),
+						   MDSCR_EL1);
+	*vcpu_cpsr(vcpu) = *vcpu_cpsr(host_vcpu);
+}
+
+static void sync_debug_state(struct pkvm_hyp_vcpu *hyp_vcpu)
+{
+	struct kvm_vcpu *vcpu = &hyp_vcpu->vcpu;
+	struct kvm_vcpu *host_vcpu = hyp_vcpu->host_vcpu;
+
+	if (!kvm_vcpu_needs_debug_regs(vcpu))
+		return;
+
+	__vcpu_restore_guest_debug_regs(vcpu);
+	vcpu->arch.debug_ptr = &host_vcpu->arch.vcpu_debug_state;
+}
+
+static void flush_hyp_vcpu(struct pkvm_hyp_vcpu *hyp_vcpu)
+{
+	struct kvm_vcpu *host_vcpu = hyp_vcpu->host_vcpu;
+	hyp_entry_exit_handler_fn ec_handler;
+	u8 esr_ec;
+
+	/*
+	 * If we deal with a non-protected guest and the state is potentially
+	 * dirty (from a host perspective), copy the state back into the hyp
+	 * vcpu.
+	 */
+	if (!pkvm_hyp_vcpu_is_protected(hyp_vcpu)) {
+		if (vcpu_get_flag(host_vcpu, PKVM_HOST_STATE_DIRTY))
+			__flush_hyp_vcpu(hyp_vcpu);
+
+		hyp_vcpu->vcpu.arch.iflags = READ_ONCE(host_vcpu->arch.iflags);
+		flush_debug_state(hyp_vcpu);
+
+		hyp_vcpu->vcpu.arch.hcr_el2 = HCR_GUEST_FLAGS & ~(HCR_RW | HCR_TWI | HCR_TWE);
+		hyp_vcpu->vcpu.arch.hcr_el2 |= READ_ONCE(host_vcpu->arch.hcr_el2);
 	}
 
-	flush_vgic_state(host_vcpu, shadow_vcpu);
-	flush_timer_state(state);
+	hyp_vcpu->vcpu.arch.vsesr_el2 = host_vcpu->arch.vsesr_el2;
 
-	switch (ARM_EXCEPTION_CODE(shadow_vcpu->arch.pkvm.exit_code)) {
+	flush_hyp_vgic_state(hyp_vcpu);
+	flush_hyp_timer_state(hyp_vcpu);
+
+	switch (ARM_EXCEPTION_CODE(hyp_vcpu->exit_code)) {
 	case ARM_EXCEPTION_IRQ:
 	case ARM_EXCEPTION_EL1_SERROR:
 	case ARM_EXCEPTION_IL:
 		break;
 	case ARM_EXCEPTION_TRAP:
-		esr_ec = ESR_ELx_EC(kvm_vcpu_get_esr(shadow_vcpu));
-		if (state->is_protected)
-			ec_handler = entry_pvm_shadow_handlers[esr_ec];
+		esr_ec = ESR_ELx_EC(kvm_vcpu_get_esr(&hyp_vcpu->vcpu));
+
+		if (pkvm_hyp_vcpu_is_protected(hyp_vcpu))
+			ec_handler = entry_hyp_pvm_handlers[esr_ec];
 		else
-			ec_handler = entry_vm_shadow_handlers[esr_ec];
+			ec_handler = entry_hyp_vm_handlers[esr_ec];
 
 		if (ec_handler)
-			ec_handler(host_vcpu, shadow_vcpu);
-
+			ec_handler(hyp_vcpu);
 		break;
 	default:
 		BUG();
 	}
 
-	shadow_vcpu->arch.pkvm.exit_code = 0;
+	hyp_vcpu->exit_code = 0;
 }
 
-static void sync_shadow_state(struct pkvm_loaded_state *state, u32 exit_reason)
+static void sync_hyp_vcpu(struct pkvm_hyp_vcpu *hyp_vcpu, u32 exit_reason)
 {
-	struct kvm_vcpu *shadow_vcpu = state->vcpu;
-	struct kvm_vcpu *host_vcpu = shadow_vcpu->arch.pkvm.host_vcpu;
+	struct kvm_vcpu *host_vcpu = hyp_vcpu->host_vcpu;
+	hyp_entry_exit_handler_fn ec_handler;
 	u8 esr_ec;
-	shadow_entry_exit_handler_fn ec_handler;
+
+	if (!pkvm_hyp_vcpu_is_protected(hyp_vcpu))
+		sync_debug_state(hyp_vcpu);
 
 	/*
 	 * Don't sync the vcpu GPR/sysreg state after a run. Instead,
-	 * leave it in the shadow until someone actually requires it.
+	 * leave it in the hyp vCPU until someone actually requires it.
 	 */
-	sync_vgic_state(host_vcpu, shadow_vcpu);
-	sync_timer_state(state);
+	sync_hyp_vgic_state(hyp_vcpu);
+	sync_hyp_timer_state(hyp_vcpu);
 
 	switch (ARM_EXCEPTION_CODE(exit_reason)) {
 	case ARM_EXCEPTION_IRQ:
 		break;
 	case ARM_EXCEPTION_TRAP:
-		esr_ec = ESR_ELx_EC(kvm_vcpu_get_esr(shadow_vcpu));
-		if (state->is_protected)
-			ec_handler = exit_pvm_shadow_handlers[esr_ec];
+		esr_ec = ESR_ELx_EC(kvm_vcpu_get_esr(&hyp_vcpu->vcpu));
+
+		if (pkvm_hyp_vcpu_is_protected(hyp_vcpu))
+			ec_handler = exit_hyp_pvm_handlers[esr_ec];
 		else
-			ec_handler = exit_vm_shadow_handlers[esr_ec];
+			ec_handler = exit_hyp_vm_handlers[esr_ec];
 
 		if (ec_handler)
-			ec_handler(host_vcpu, shadow_vcpu);
-
+			ec_handler(hyp_vcpu);
 		break;
 	case ARM_EXCEPTION_EL1_SERROR:
 	case ARM_EXCEPTION_IL:
@@ -600,8 +657,21 @@ static void sync_shadow_state(struct pkvm_loaded_state *state, u32 exit_reason)
 		BUG();
 	}
 
-	host_vcpu->arch.flags &= ~(KVM_ARM64_PENDING_EXCEPTION | KVM_ARM64_INCREMENT_PC);
-	shadow_vcpu->arch.pkvm.exit_code = exit_reason;
+	if (pkvm_hyp_vcpu_is_protected(hyp_vcpu))
+		vcpu_clear_flag(host_vcpu, PC_UPDATE_REQ);
+	else
+		host_vcpu->arch.iflags = hyp_vcpu->vcpu.arch.iflags;
+
+	hyp_vcpu->exit_code = exit_reason;
+}
+
+static void __hyp_sve_save_guest(struct pkvm_hyp_vcpu *hyp_vcpu)
+{
+	struct kvm_vcpu *vcpu = &hyp_vcpu->vcpu;
+
+	__sve_save_state(vcpu_sve_pffr(vcpu), &vcpu->arch.ctxt.fp_regs.fpsr);
+	__vcpu_sys_reg(vcpu, ZCR_EL1) = read_sysreg_el1(SYS_ZCR);
+	sve_cond_update_zcr_vq(vcpu_sve_max_vq(vcpu) - 1, SYS_ZCR_EL1);
 }
 
 static void fpsimd_host_restore(void)
@@ -610,13 +680,27 @@ static void fpsimd_host_restore(void)
 	isb();
 
 	if (unlikely(is_protected_kvm_enabled())) {
-		struct pkvm_loaded_state *state = this_cpu_ptr(&loaded_state);
+		struct pkvm_hyp_vcpu *hyp_vcpu = pkvm_get_loaded_hyp_vcpu();
+		struct kvm_vcpu *vcpu = &hyp_vcpu->vcpu;
 
-		__fpsimd_save_state(&state->vcpu->arch.ctxt.fp_regs);
-		__fpsimd_restore_state(&state->host_fpsimd_state);
+		if (vcpu_has_sve(vcpu))
+			__hyp_sve_save_guest(hyp_vcpu);
+		else
+			__fpsimd_save_state(&hyp_vcpu->vcpu.arch.ctxt.fp_regs);
 
-		state->vcpu->arch.flags &= ~KVM_ARM64_FP_ENABLED;
-		state->vcpu->arch.flags |= KVM_ARM64_FP_HOST;
+		if (system_supports_sve()) {
+			struct kvm_host_sve_state *sve_state = get_host_sve_state(vcpu);
+
+			write_sysreg_el1(sve_state->zcr_el1, SYS_ZCR);
+			pkvm_set_max_sve_vq();
+			__sve_restore_state(sve_state->sve_regs +
+					    sve_ffr_offset(kvm_host_sve_max_vl),
+					    &sve_state->fpsr);
+		} else {
+			__fpsimd_restore_state(get_host_fpsimd_state(vcpu));
+		}
+
+		hyp_vcpu->vcpu.arch.fp_state = FP_STATE_HOST_OWNED;
 	}
 
 	if (system_supports_sve())
@@ -625,212 +709,211 @@ static void fpsimd_host_restore(void)
 
 static void handle___pkvm_vcpu_load(struct kvm_cpu_context *host_ctxt)
 {
-	DECLARE_REG(int, shadow_handle, host_ctxt, 1);
-	DECLARE_REG(int, vcpu_idx, host_ctxt, 2);
+	DECLARE_REG(pkvm_handle_t, handle, host_ctxt, 1);
+	DECLARE_REG(unsigned int, vcpu_idx, host_ctxt, 2);
 	DECLARE_REG(u64, hcr_el2, host_ctxt, 3);
-	struct pkvm_loaded_state *state;
+	struct pkvm_hyp_vcpu *hyp_vcpu;
+	int __percpu *last_vcpu_ran;
+	int *last_ran;
 
-	/* Why did you bother? */
 	if (!is_protected_kvm_enabled())
 		return;
 
-	state = this_cpu_ptr(&loaded_state);
-
-	/* Nice try */
-	if (state->vcpu)
+	hyp_vcpu = pkvm_load_hyp_vcpu(handle, vcpu_idx);
+	if (!hyp_vcpu)
 		return;
 
-	state->vcpu = get_shadow_vcpu(shadow_handle, vcpu_idx);
+	/*
+	 * Guarantee that both TLBs and I-cache are private to each vcpu. If a
+	 * vcpu from the same VM has previously run on the same physical CPU,
+	 * nuke the relevant contexts.
+	 */
+	last_vcpu_ran = hyp_vcpu->vcpu.arch.hw_mmu->last_vcpu_ran;
+	last_ran = (__force int *) &last_vcpu_ran[hyp_smp_processor_id()];
+	if (*last_ran != hyp_vcpu->vcpu.vcpu_id) {
+		__kvm_flush_cpu_context(hyp_vcpu->vcpu.arch.hw_mmu);
+		*last_ran = hyp_vcpu->vcpu.vcpu_id;
+	}
 
-	if (!state->vcpu)
-		return;
+	hyp_vcpu->vcpu.arch.fp_state = FP_STATE_HOST_OWNED;
 
-	state->is_protected = state->vcpu->arch.pkvm.shadow_vm->arch.pkvm.enabled;
-
-	state->vcpu->arch.host_fpsimd_state = &state->host_fpsimd_state;
-	state->vcpu->arch.flags |= KVM_ARM64_FP_HOST;
-
-	if (state->is_protected) {
+	if (pkvm_hyp_vcpu_is_protected(hyp_vcpu)) {
 		/* Propagate WFx trapping flags, trap ptrauth */
-		state->vcpu->arch.hcr_el2 &= ~(HCR_TWE | HCR_TWI |
-					       HCR_API | HCR_APK);
-		state->vcpu->arch.hcr_el2 |= hcr_el2 & (HCR_TWE | HCR_TWI);
+		hyp_vcpu->vcpu.arch.hcr_el2 &= ~(HCR_TWE | HCR_TWI |
+						     HCR_API | HCR_APK);
+		hyp_vcpu->vcpu.arch.hcr_el2 |= hcr_el2 & (HCR_TWE | HCR_TWI);
 	}
 }
 
 static void handle___pkvm_vcpu_put(struct kvm_cpu_context *host_ctxt)
 {
-	if (unlikely(is_protected_kvm_enabled())) {
-		struct pkvm_loaded_state *state = this_cpu_ptr(&loaded_state);
+	struct pkvm_hyp_vcpu *hyp_vcpu;
 
-		if (state->vcpu) {
-			struct kvm_vcpu *host_vcpu = state->vcpu->arch.pkvm.host_vcpu;
+	if (!is_protected_kvm_enabled())
+		return;
 
-			if (state->vcpu->arch.flags & KVM_ARM64_FP_ENABLED)
-				fpsimd_host_restore();
+	hyp_vcpu = pkvm_get_loaded_hyp_vcpu();
+	if (hyp_vcpu) {
+		struct kvm_vcpu *host_vcpu = hyp_vcpu->host_vcpu;
 
-			if (!state->is_protected &&
-			    !(READ_ONCE(host_vcpu->arch.flags) & KVM_ARM64_PKVM_STATE_DIRTY))
-				__sync_vcpu_state(state->vcpu);
+		if (hyp_vcpu->vcpu.arch.fp_state == FP_STATE_GUEST_OWNED)
+			fpsimd_host_restore();
 
-			put_shadow_vcpu(state->vcpu);
-
-			/* "It's over and done with..." */
-			state->vcpu = NULL;
+		if (!pkvm_hyp_vcpu_is_protected(hyp_vcpu) &&
+		    !vcpu_get_flag(host_vcpu, PKVM_HOST_STATE_DIRTY)) {
+			__sync_hyp_vcpu(hyp_vcpu);
 		}
+
+		pkvm_put_hyp_vcpu(hyp_vcpu);
 	}
 }
 
 static void handle___pkvm_vcpu_sync_state(struct kvm_cpu_context *host_ctxt)
 {
-	if (unlikely(is_protected_kvm_enabled())) {
-		struct pkvm_loaded_state *state = this_cpu_ptr(&loaded_state);
+	struct pkvm_hyp_vcpu *hyp_vcpu;
 
-		if (!state->vcpu || state->is_protected)
-			return;
+	if (!is_protected_kvm_enabled())
+		return;
 
-		__sync_vcpu_state(state->vcpu);
-	}
+	hyp_vcpu = pkvm_get_loaded_hyp_vcpu();
+	if (!hyp_vcpu || pkvm_hyp_vcpu_is_protected(hyp_vcpu))
+		return;
+
+	if (hyp_vcpu->vcpu.arch.fp_state == FP_STATE_GUEST_OWNED)
+		fpsimd_host_restore();
+
+	__sync_hyp_vcpu(hyp_vcpu);
 }
 
-static struct kvm_vcpu *__get_current_vcpu(struct kvm_vcpu *vcpu,
-					   struct pkvm_loaded_state **state)
+static struct kvm_vcpu *__get_host_hyp_vcpus(struct kvm_vcpu *arg,
+					     struct pkvm_hyp_vcpu **hyp_vcpup)
 {
-	struct pkvm_loaded_state *sstate = NULL;
-
-	vcpu = kern_hyp_va(vcpu);
+	struct kvm_vcpu *host_vcpu = kern_hyp_va(arg);
+	struct pkvm_hyp_vcpu *hyp_vcpu = NULL;
 
 	if (unlikely(is_protected_kvm_enabled())) {
-		sstate = this_cpu_ptr(&loaded_state);
+		hyp_vcpu = pkvm_get_loaded_hyp_vcpu();
 
-		if (!sstate || vcpu != sstate->vcpu->arch.pkvm.host_vcpu) {
-			sstate = NULL;
-			vcpu = NULL;
+		if (!hyp_vcpu || hyp_vcpu->host_vcpu != host_vcpu) {
+			hyp_vcpu = NULL;
+			host_vcpu = NULL;
 		}
 	}
 
-	*state = sstate;
-	return vcpu;
+	*hyp_vcpup = hyp_vcpu;
+	return host_vcpu;
 }
 
-#define get_current_vcpu(ctxt, regnr, statepp)				\
+#define get_host_hyp_vcpus(ctxt, regnr, hyp_vcpup)			\
 	({								\
 		DECLARE_REG(struct kvm_vcpu *, __vcpu, ctxt, regnr);	\
-		__get_current_vcpu(__vcpu, statepp);			\
+		__get_host_hyp_vcpus(__vcpu, hyp_vcpup);		\
 	})
 
-#define get_current_vcpu_from_cpu_if(ctxt, regnr, statepp)		\
-	({								\
-		DECLARE_REG(struct vgic_v3_cpu_if *, cif, ctxt, regnr); \
-		struct kvm_vcpu *__vcpu;				\
-		__vcpu = container_of(cif,				\
-				      struct kvm_vcpu,			\
-				      arch.vgic_cpu.vgic_v3);		\
-									\
-		__get_current_vcpu(__vcpu, statepp);			\
+#define get_host_hyp_vcpus_from_vgic_v3_cpu_if(ctxt, regnr, hyp_vcpup)		\
+	({									\
+		DECLARE_REG(struct vgic_v3_cpu_if *, cif, ctxt, regnr); 	\
+		struct kvm_vcpu *__vcpu = container_of(cif,			\
+						       struct kvm_vcpu,		\
+						       arch.vgic_cpu.vgic_v3);	\
+										\
+		__get_host_hyp_vcpus(__vcpu, hyp_vcpup);			\
 	})
 
-static bool is_vcpu_runnable(struct pkvm_loaded_state *shadow_state)
+static bool is_vcpu_runnable(struct pkvm_hyp_vcpu *hyp_vcpu)
 {
-	struct kvm_vcpu *shadow_vcpu = shadow_state->vcpu;
-
-	return (!shadow_state->is_protected ||
-		shadow_vcpu->arch.pkvm.power_state == PSCI_0_2_AFFINITY_LEVEL_ON);
+	return (!pkvm_hyp_vcpu_is_protected(hyp_vcpu) ||
+		hyp_vcpu->power_state == PSCI_0_2_AFFINITY_LEVEL_ON);
 }
 
 static void handle___kvm_vcpu_run(struct kvm_cpu_context *host_ctxt)
 {
-	struct pkvm_loaded_state *shadow_state;
-	struct kvm_vcpu *vcpu;
+	struct pkvm_hyp_vcpu *hyp_vcpu;
+	struct kvm_vcpu *host_vcpu;
 	int ret = ARM_EXCEPTION_IL;
 
-	vcpu = get_current_vcpu(host_ctxt, 1, &shadow_state);
-	if (!vcpu)
+	host_vcpu = get_host_hyp_vcpus(host_ctxt, 1, &hyp_vcpu);
+	if (!host_vcpu)
 		goto out;
 
-	if (unlikely(shadow_state)) {
-		struct kvm_vcpu *shadow_vcpu = shadow_state->vcpu;
+	if (unlikely(hyp_vcpu)) {
+		if (hyp_vcpu->power_state == PSCI_0_2_AFFINITY_LEVEL_ON_PENDING)
+			pkvm_reset_vcpu(hyp_vcpu);
 
-		if (READ_ONCE(shadow_vcpu->arch.pkvm.power_state) ==
-		    PSCI_0_2_AFFINITY_LEVEL_ON_PENDING) {
-			pkvm_reset_vcpu(shadow_vcpu);
-		}
-
-		if (unlikely(!is_vcpu_runnable(shadow_state)))
+		if (unlikely(!is_vcpu_runnable(hyp_vcpu)))
 			goto out;
 
-		flush_shadow_state(shadow_state);
+		flush_hyp_vcpu(hyp_vcpu);
 
-		ret = __kvm_vcpu_run(shadow_state->vcpu);
+		ret = __kvm_vcpu_run(&hyp_vcpu->vcpu);
 
-		sync_shadow_state(shadow_state, ret);
+		sync_hyp_vcpu(hyp_vcpu, ret);
 
-		if (shadow_state->vcpu->arch.flags & KVM_ARM64_FP_ENABLED) {
+		if (hyp_vcpu->vcpu.arch.fp_state == FP_STATE_GUEST_OWNED) {
 			/*
 			 * The guest has used the FP, trap all accesses
 			 * from the host (both FP and SVE).
 			 */
 			u64 reg = CPTR_EL2_TFP;
+
 			if (system_supports_sve())
 				reg |= CPTR_EL2_TZ;
 
 			sysreg_clear_set(cptr_el2, 0, reg);
 		}
 	} else {
-		ret = __kvm_vcpu_run(vcpu);
+		/* The host is fully trusted, run its vCPU directly. */
+		ret = __kvm_vcpu_run(host_vcpu);
 	}
-
 out:
 	cpu_reg(host_ctxt, 1) =  ret;
 }
 
-static void handle___pkvm_host_donate_guest(struct kvm_cpu_context *host_ctxt)
+static void handle___pkvm_host_map_guest(struct kvm_cpu_context *host_ctxt)
 {
 	DECLARE_REG(u64, pfn, host_ctxt, 1);
 	DECLARE_REG(u64, gfn, host_ctxt, 2);
-	struct kvm_vcpu *host_vcpu;
-	struct pkvm_loaded_state *state;
+	struct pkvm_hyp_vcpu *hyp_vcpu;
 	int ret = -EINVAL;
 
 	if (!is_protected_kvm_enabled())
 		goto out;
 
-	state = this_cpu_ptr(&loaded_state);
-	if (!state->vcpu)
+	hyp_vcpu = pkvm_get_loaded_hyp_vcpu();
+	if (!hyp_vcpu)
 		goto out;
 
-	host_vcpu = state->vcpu->arch.pkvm.host_vcpu;
+	/* Top-up our per-vcpu memcache from the host's */
+	ret = pkvm_refill_memcache(hyp_vcpu);
+	if (ret)
+		goto out;
 
-	/* Topup shadow memcache with the host's */
-	ret = pkvm_refill_memcache(state->vcpu, host_vcpu);
-	if (!ret) {
-		if (state->is_protected)
-			ret = __pkvm_host_donate_guest(pfn, gfn, state->vcpu);
-		else
-			ret = __pkvm_host_share_guest(pfn, gfn, state->vcpu);
-	}
+	if (pkvm_hyp_vcpu_is_protected(hyp_vcpu))
+		ret = __pkvm_host_donate_guest(pfn, gfn, hyp_vcpu);
+	else
+		ret = __pkvm_host_share_guest(pfn, gfn, hyp_vcpu);
 out:
 	cpu_reg(host_ctxt, 1) =  ret;
 }
 
 static void handle___kvm_adjust_pc(struct kvm_cpu_context *host_ctxt)
 {
-	struct pkvm_loaded_state *shadow_state;
-	struct kvm_vcpu *vcpu;
+	struct pkvm_hyp_vcpu *hyp_vcpu;
+	struct kvm_vcpu *host_vcpu;
 
-	vcpu = get_current_vcpu(host_ctxt, 1, &shadow_state);
-	if (!vcpu)
+	host_vcpu = get_host_hyp_vcpus(host_ctxt, 1, &hyp_vcpu);
+	if (!host_vcpu)
 		return;
 
-	if (shadow_state) {
+	if (hyp_vcpu) {
 		/* This only applies to non-protected VMs */
-		if (shadow_state->is_protected)
+		if (pkvm_hyp_vcpu_is_protected(hyp_vcpu))
 			return;
 
-		vcpu = shadow_state->vcpu;
+		__kvm_adjust_pc(&hyp_vcpu->vcpu);
+	} else {
+		__kvm_adjust_pc(host_vcpu);
 	}
-
-	__kvm_adjust_pc(vcpu);
 }
 
 static void handle___kvm_flush_vm_context(struct kvm_cpu_context *host_ctxt)
@@ -892,61 +975,62 @@ static void handle___kvm_get_mdcr_el2(struct kvm_cpu_context *host_ctxt)
 
 static void handle___vgic_v3_save_vmcr_aprs(struct kvm_cpu_context *host_ctxt)
 {
-	struct pkvm_loaded_state *shadow_state;
-	struct kvm_vcpu *vcpu;
+	struct pkvm_hyp_vcpu *hyp_vcpu;
+	struct kvm_vcpu *host_vcpu;
 
-	vcpu = get_current_vcpu_from_cpu_if(host_ctxt, 1, &shadow_state);
-	if (!vcpu)
+	host_vcpu = get_host_hyp_vcpus_from_vgic_v3_cpu_if(host_ctxt, 1,
+							   &hyp_vcpu);
+	if (!host_vcpu)
 		return;
 
-	if (shadow_state) {
-		struct vgic_v3_cpu_if *shadow_cpu_if, *cpu_if;
+	if (unlikely(hyp_vcpu)) {
+		struct vgic_v3_cpu_if *hyp_cpu_if, *host_cpu_if;
 		int i;
 
-		shadow_cpu_if = &shadow_state->vcpu->arch.vgic_cpu.vgic_v3;
-		__vgic_v3_save_vmcr_aprs(shadow_cpu_if);
+		hyp_cpu_if = &hyp_vcpu->vcpu.arch.vgic_cpu.vgic_v3;
+		__vgic_v3_save_vmcr_aprs(hyp_cpu_if);
 
-		cpu_if = &vcpu->arch.vgic_cpu.vgic_v3;
-
-		cpu_if->vgic_vmcr = shadow_cpu_if->vgic_vmcr;
-		for (i = 0; i < ARRAY_SIZE(cpu_if->vgic_ap0r); i++) {
-			cpu_if->vgic_ap0r[i] = shadow_cpu_if->vgic_ap0r[i];
-			cpu_if->vgic_ap1r[i] = shadow_cpu_if->vgic_ap1r[i];
+		host_cpu_if = &host_vcpu->arch.vgic_cpu.vgic_v3;
+		host_cpu_if->vgic_vmcr = hyp_cpu_if->vgic_vmcr;
+		for (i = 0; i < ARRAY_SIZE(host_cpu_if->vgic_ap0r); i++) {
+			host_cpu_if->vgic_ap0r[i] = hyp_cpu_if->vgic_ap0r[i];
+			host_cpu_if->vgic_ap1r[i] = hyp_cpu_if->vgic_ap1r[i];
 		}
 	} else {
-		__vgic_v3_save_vmcr_aprs(&vcpu->arch.vgic_cpu.vgic_v3);
+		__vgic_v3_save_vmcr_aprs(&host_vcpu->arch.vgic_cpu.vgic_v3);
 	}
 }
 
 static void handle___vgic_v3_restore_vmcr_aprs(struct kvm_cpu_context *host_ctxt)
 {
-	struct pkvm_loaded_state *shadow_state;
-	struct kvm_vcpu *vcpu;
+	struct pkvm_hyp_vcpu *hyp_vcpu;
+	struct kvm_vcpu *host_vcpu;
 
-	vcpu = get_current_vcpu_from_cpu_if(host_ctxt, 1, &shadow_state);
-	if (!vcpu)
+	host_vcpu = get_host_hyp_vcpus_from_vgic_v3_cpu_if(host_ctxt, 1,
+							   &hyp_vcpu);
+	if (!host_vcpu)
 		return;
 
-	if (shadow_state) {
-		struct vgic_v3_cpu_if *shadow_cpu_if, *cpu_if;
+	if (unlikely(hyp_vcpu)) {
+		struct vgic_v3_cpu_if *hyp_cpu_if, *host_cpu_if;
 		int i;
 
-		shadow_cpu_if = &shadow_state->vcpu->arch.vgic_cpu.vgic_v3;
-		cpu_if = &vcpu->arch.vgic_cpu.vgic_v3;
+		hyp_cpu_if = &hyp_vcpu->vcpu.arch.vgic_cpu.vgic_v3;
+		host_cpu_if = &host_vcpu->arch.vgic_cpu.vgic_v3;
 
-		shadow_cpu_if->vgic_vmcr = cpu_if->vgic_vmcr;
+		hyp_cpu_if->vgic_vmcr = host_cpu_if->vgic_vmcr;
 		/* Should be a one-off */
-		shadow_cpu_if->vgic_sre = (ICC_SRE_EL1_DIB |
-					   ICC_SRE_EL1_DFB |
-					   ICC_SRE_EL1_SRE);
-		for (i = 0; i < ARRAY_SIZE(cpu_if->vgic_ap0r); i++) {
-			shadow_cpu_if->vgic_ap0r[i] = cpu_if->vgic_ap0r[i];
-			shadow_cpu_if->vgic_ap1r[i] = cpu_if->vgic_ap1r[i];
+		hyp_cpu_if->vgic_sre = (ICC_SRE_EL1_DIB |
+					ICC_SRE_EL1_DFB |
+					ICC_SRE_EL1_SRE);
+		for (i = 0; i < ARRAY_SIZE(host_cpu_if->vgic_ap0r); i++) {
+			hyp_cpu_if->vgic_ap0r[i] = host_cpu_if->vgic_ap0r[i];
+			hyp_cpu_if->vgic_ap1r[i] = host_cpu_if->vgic_ap1r[i];
 		}
 
-		__vgic_v3_restore_vmcr_aprs(shadow_cpu_if);
+		__vgic_v3_restore_vmcr_aprs(hyp_cpu_if);
 	} else {
-		__vgic_v3_restore_vmcr_aprs(&vcpu->arch.vgic_cpu.vgic_v3);
+		__vgic_v3_restore_vmcr_aprs(&host_vcpu->arch.vgic_cpu.vgic_v3);
 	}
 }
 
@@ -988,11 +1072,13 @@ static void handle___pkvm_host_unshare_hyp(struct kvm_cpu_context *host_ctxt)
 	cpu_reg(host_ctxt, 1) = __pkvm_host_unshare_hyp(pfn);
 }
 
-static void handle___pkvm_host_reclaim_page(struct kvm_cpu_context *host_ctxt)
+static void handle___pkvm_reclaim_dying_guest_page(struct kvm_cpu_context *host_ctxt)
 {
-	DECLARE_REG(u64, pfn, host_ctxt, 1);
+	DECLARE_REG(pkvm_handle_t, handle, host_ctxt, 1);
+	DECLARE_REG(u64, pfn, host_ctxt, 2);
+	DECLARE_REG(u64, ipa, host_ctxt, 3);
 
-	cpu_reg(host_ctxt, 1) = __pkvm_host_reclaim_page(pfn);
+	cpu_reg(host_ctxt, 1) = __pkvm_reclaim_dying_guest_page(handle, pfn, ipa);
 }
 
 static void handle___pkvm_create_private_mapping(struct kvm_cpu_context *host_ctxt)
@@ -1001,7 +1087,23 @@ static void handle___pkvm_create_private_mapping(struct kvm_cpu_context *host_ct
 	DECLARE_REG(size_t, size, host_ctxt, 2);
 	DECLARE_REG(enum kvm_pgtable_prot, prot, host_ctxt, 3);
 
-	cpu_reg(host_ctxt, 1) = __pkvm_create_private_mapping(phys, size, prot);
+	/*
+	 * __pkvm_create_private_mapping() populates a pointer with the
+	 * hypervisor start address of the allocation.
+	 *
+	 * However, handle___pkvm_create_private_mapping() hypercall crosses the
+	 * EL1/EL2 boundary so the pointer would not be valid in this context.
+	 *
+	 * Instead pass the allocation address as the return value (or return
+	 * ERR_PTR() on failure).
+	 */
+	unsigned long haddr;
+	int err = __pkvm_create_private_mapping(phys, size, prot, &haddr);
+
+	if (err)
+		haddr = (unsigned long)ERR_PTR(err);
+
+	cpu_reg(host_ctxt, 1) = haddr;
 }
 
 static void handle___pkvm_prot_finalize(struct kvm_cpu_context *host_ctxt)
@@ -1009,57 +1111,64 @@ static void handle___pkvm_prot_finalize(struct kvm_cpu_context *host_ctxt)
 	cpu_reg(host_ctxt, 1) = __pkvm_prot_finalize();
 }
 
-static void handle___pkvm_init_shadow(struct kvm_cpu_context *host_ctxt)
+static void handle___pkvm_init_vm(struct kvm_cpu_context *host_ctxt)
 {
 	DECLARE_REG(struct kvm *, host_kvm, host_ctxt, 1);
-	DECLARE_REG(void *, host_shadow_va, host_ctxt, 2);
-	DECLARE_REG(size_t, shadow_size, host_ctxt, 3);
-	DECLARE_REG(void *, pgd, host_ctxt, 4);
+	DECLARE_REG(unsigned long, vm_hva, host_ctxt, 2);
+	DECLARE_REG(unsigned long, pgd_hva, host_ctxt, 3);
+	DECLARE_REG(unsigned long, last_ran_hva, host_ctxt, 4);
 
-	cpu_reg(host_ctxt, 1) = __pkvm_init_shadow(host_kvm, host_shadow_va,
-						   shadow_size, pgd);
+	host_kvm = kern_hyp_va(host_kvm);
+	cpu_reg(host_ctxt, 1) = __pkvm_init_vm(host_kvm, vm_hva, pgd_hva,
+					       last_ran_hva);
 }
 
-static void handle___pkvm_init_shadow_vcpu(struct kvm_cpu_context *host_ctxt)
+static void handle___pkvm_init_vcpu(struct kvm_cpu_context *host_ctxt)
 {
-	DECLARE_REG(unsigned int, shadow_handle, host_ctxt, 1);
+	DECLARE_REG(pkvm_handle_t, handle, host_ctxt, 1);
 	DECLARE_REG(struct kvm_vcpu *, host_vcpu, host_ctxt, 2);
-	DECLARE_REG(void *, shadow_vcpu_hva, host_ctxt, 3);
+	DECLARE_REG(unsigned long, vcpu_hva, host_ctxt, 3);
 
-	cpu_reg(host_ctxt, 1) =	__pkvm_init_shadow_vcpu(shadow_handle,
-							host_vcpu,
-							shadow_vcpu_hva);
+	host_vcpu = kern_hyp_va(host_vcpu);
+	cpu_reg(host_ctxt, 1) = __pkvm_init_vcpu(handle, host_vcpu, vcpu_hva);
 }
 
-static void handle___pkvm_teardown_shadow(struct kvm_cpu_context *host_ctxt)
+static void handle___pkvm_start_teardown_vm(struct kvm_cpu_context *host_ctxt)
 {
-	DECLARE_REG(int, shadow_handle, host_ctxt, 1);
+	DECLARE_REG(pkvm_handle_t, handle, host_ctxt, 1);
 
-	cpu_reg(host_ctxt, 1) = __pkvm_teardown_shadow(shadow_handle);
+	cpu_reg(host_ctxt, 1) = __pkvm_start_teardown_vm(handle);
 }
 
+static void handle___pkvm_finalize_teardown_vm(struct kvm_cpu_context *host_ctxt)
+{
+	DECLARE_REG(pkvm_handle_t, handle, host_ctxt, 1);
+
+	cpu_reg(host_ctxt, 1) = __pkvm_finalize_teardown_vm(handle);
+}
 static void handle___pkvm_iommu_driver_init(struct kvm_cpu_context *host_ctxt)
 {
-	DECLARE_REG(enum pkvm_iommu_driver_id, id, host_ctxt, 1);
+	DECLARE_REG(struct pkvm_iommu_driver*, drv, host_ctxt, 1);
 	DECLARE_REG(void *, data, host_ctxt, 2);
 	DECLARE_REG(size_t, size, host_ctxt, 3);
 
-	cpu_reg(host_ctxt, 1) = __pkvm_iommu_driver_init(id, data, size);
+	data = kern_hyp_va(data);
+
+	cpu_reg(host_ctxt, 1) = __pkvm_iommu_driver_init(drv, data, size);
 }
 
 static void handle___pkvm_iommu_register(struct kvm_cpu_context *host_ctxt)
 {
 	DECLARE_REG(unsigned long, dev_id, host_ctxt, 1);
-	DECLARE_REG(enum pkvm_iommu_driver_id, drv_id, host_ctxt, 2);
+	DECLARE_REG(unsigned long, drv_id, host_ctxt, 2);
 	DECLARE_REG(phys_addr_t, dev_pa, host_ctxt, 3);
 	DECLARE_REG(size_t, dev_size, host_ctxt, 4);
 	DECLARE_REG(unsigned long, parent_id, host_ctxt, 5);
-	DECLARE_REG(void *, mem, host_ctxt, 6);
-	DECLARE_REG(size_t, mem_size, host_ctxt, 7);
+	DECLARE_REG(u8, flags, host_ctxt, 6);
+	DECLARE_REG(void *, mem, host_ctxt, 7);
 
 	cpu_reg(host_ctxt, 1) = __pkvm_iommu_register(dev_id, drv_id, dev_pa,
-						      dev_size, parent_id,
-						      mem, mem_size);
+						      dev_size, parent_id, flags, mem);
 }
 
 static void handle___pkvm_iommu_pm_notify(struct kvm_cpu_context *host_ctxt)
@@ -1072,8 +1181,103 @@ static void handle___pkvm_iommu_pm_notify(struct kvm_cpu_context *host_ctxt)
 
 static void handle___pkvm_iommu_finalize(struct kvm_cpu_context *host_ctxt)
 {
-	cpu_reg(host_ctxt, 1) = __pkvm_iommu_finalize();
+	DECLARE_REG(int, err, host_ctxt, 1);
+
+	cpu_reg(host_ctxt, 1) = __pkvm_iommu_finalize(err);
 }
+
+static void handle___pkvm_alloc_module_va(struct kvm_cpu_context *host_ctxt)
+{
+	DECLARE_REG(u64, nr_pages, host_ctxt, 1);
+
+	cpu_reg(host_ctxt, 1) = (u64)__pkvm_alloc_module_va(nr_pages);
+}
+
+static void handle___pkvm_map_module_page(struct kvm_cpu_context *host_ctxt)
+{
+	DECLARE_REG(u64, pfn, host_ctxt, 1);
+	DECLARE_REG(void *, va, host_ctxt, 2);
+	DECLARE_REG(enum kvm_pgtable_prot, prot, host_ctxt, 3);
+
+	cpu_reg(host_ctxt, 1) = (u64)__pkvm_map_module_page(pfn, va, prot, false);
+}
+
+static void handle___pkvm_unmap_module_page(struct kvm_cpu_context *host_ctxt)
+{
+	DECLARE_REG(u64, pfn, host_ctxt, 1);
+	DECLARE_REG(void *, va, host_ctxt, 2);
+
+	__pkvm_unmap_module_page(pfn, va);
+}
+
+static void handle___pkvm_init_module(struct kvm_cpu_context *host_ctxt)
+{
+	DECLARE_REG(void *, ptr, host_ctxt, 1);
+
+	cpu_reg(host_ctxt, 1) = __pkvm_init_module(ptr);
+}
+
+static void handle___pkvm_register_hcall(struct kvm_cpu_context *host_ctxt)
+{
+	DECLARE_REG(unsigned long, hfn_hyp_va, host_ctxt, 1);
+
+	cpu_reg(host_ctxt, 1) = __pkvm_register_hcall(hfn_hyp_va);
+}
+
+static void handle___pkvm_load_tracing(struct kvm_cpu_context *host_ctxt)
+{
+	 DECLARE_REG(unsigned long, pack_hva, host_ctxt, 1);
+	 DECLARE_REG(size_t, pack_size, host_ctxt, 2);
+
+	 cpu_reg(host_ctxt, 1) = __pkvm_load_tracing(pack_hva, pack_size);
+}
+
+static void handle___pkvm_teardown_tracing(struct kvm_cpu_context *host_ctxt)
+{
+	__pkvm_teardown_tracing();
+
+	cpu_reg(host_ctxt, 1) = 0;
+}
+
+static void handle___pkvm_enable_tracing(struct kvm_cpu_context *host_ctxt)
+{
+	DECLARE_REG(bool, enable, host_ctxt, 1);
+
+	cpu_reg(host_ctxt, 1) = __pkvm_enable_tracing(enable);
+}
+
+static void handle___pkvm_rb_swap_reader_page(struct kvm_cpu_context *host_ctxt)
+{
+	DECLARE_REG(unsigned int, cpu, host_ctxt, 1);
+
+	cpu_reg(host_ctxt, 1) = __pkvm_rb_swap_reader_page(cpu);
+}
+
+static void handle___pkvm_rb_update_footers(struct kvm_cpu_context *host_ctxt)
+{
+	DECLARE_REG(unsigned int, cpu, host_ctxt, 1);
+
+	cpu_reg(host_ctxt, 1) = __pkvm_rb_update_footers(cpu);
+}
+
+static void handle___pkvm_enable_event(struct kvm_cpu_context *host_ctxt)
+{
+	DECLARE_REG(unsigned short, id, host_ctxt, 1);
+	DECLARE_REG(bool, enable, host_ctxt, 2);
+
+	cpu_reg(host_ctxt, 1) = __pkvm_enable_event(id, enable);
+}
+
+#ifdef CONFIG_ANDROID_ARM64_WORKAROUND_DMA_BEYOND_POC
+extern int __pkvm_host_set_stage2_memattr(phys_addr_t phys, bool force_nc);
+static void handle___pkvm_host_set_stage2_memattr(struct kvm_cpu_context *host_ctxt)
+{
+	DECLARE_REG(phys_addr_t, phys, host_ctxt, 1);
+	DECLARE_REG(bool, force_nc, host_ctxt, 2);
+
+	cpu_reg(host_ctxt, 1) = __pkvm_host_set_stage2_memattr(phys, force_nc);
+}
+#endif
 
 typedef void (*hcall_t)(struct kvm_cpu_context *);
 
@@ -1092,20 +1296,26 @@ static const hcall_t host_hcall[] = {
 	HANDLE_FUNC(__kvm_tlb_flush_vmid_ipa),
 	HANDLE_FUNC(__kvm_tlb_flush_vmid),
 	HANDLE_FUNC(__kvm_flush_cpu_context),
+	HANDLE_FUNC(__pkvm_alloc_module_va),
+	HANDLE_FUNC(__pkvm_map_module_page),
+	HANDLE_FUNC(__pkvm_unmap_module_page),
+	HANDLE_FUNC(__pkvm_init_module),
+	HANDLE_FUNC(__pkvm_register_hcall),
 	HANDLE_FUNC(__pkvm_prot_finalize),
 
 	HANDLE_FUNC(__pkvm_host_share_hyp),
 	HANDLE_FUNC(__pkvm_host_unshare_hyp),
-	HANDLE_FUNC(__pkvm_host_reclaim_page),
-	HANDLE_FUNC(__pkvm_host_donate_guest),
+	HANDLE_FUNC(__pkvm_host_map_guest),
 	HANDLE_FUNC(__kvm_adjust_pc),
 	HANDLE_FUNC(__kvm_vcpu_run),
 	HANDLE_FUNC(__kvm_timer_set_cntvoff),
 	HANDLE_FUNC(__vgic_v3_save_vmcr_aprs),
 	HANDLE_FUNC(__vgic_v3_restore_vmcr_aprs),
-	HANDLE_FUNC(__pkvm_init_shadow),
-	HANDLE_FUNC(__pkvm_init_shadow_vcpu),
-	HANDLE_FUNC(__pkvm_teardown_shadow),
+	HANDLE_FUNC(__pkvm_init_vm),
+	HANDLE_FUNC(__pkvm_init_vcpu),
+	HANDLE_FUNC(__pkvm_start_teardown_vm),
+	HANDLE_FUNC(__pkvm_finalize_teardown_vm),
+	HANDLE_FUNC(__pkvm_reclaim_dying_guest_page),
 	HANDLE_FUNC(__pkvm_vcpu_load),
 	HANDLE_FUNC(__pkvm_vcpu_put),
 	HANDLE_FUNC(__pkvm_vcpu_sync_state),
@@ -1113,46 +1323,25 @@ static const hcall_t host_hcall[] = {
 	HANDLE_FUNC(__pkvm_iommu_register),
 	HANDLE_FUNC(__pkvm_iommu_pm_notify),
 	HANDLE_FUNC(__pkvm_iommu_finalize),
+	HANDLE_FUNC(__pkvm_load_tracing),
+	HANDLE_FUNC(__pkvm_teardown_tracing),
+	HANDLE_FUNC(__pkvm_enable_tracing),
+	HANDLE_FUNC(__pkvm_rb_swap_reader_page),
+	HANDLE_FUNC(__pkvm_rb_update_footers),
+	HANDLE_FUNC(__pkvm_enable_event),
+#ifdef CONFIG_ANDROID_ARM64_WORKAROUND_DMA_BEYOND_POC
+	HANDLE_FUNC(__pkvm_host_set_stage2_memattr),
+#endif
 };
-
-static inline u64 kernel__text_addr(void)
-{
-	u64 val;
-
-	asm volatile(ALTERNATIVE_CB("movz	%0, #0\n"
-				    "movk	%0, #0, lsl #16\n"
-				    "movk	%0, #0, lsl #32\n"
-				    "movk	%0, #0, lsl #48\n",
-				    kvm_get__text)
-		     : "=r" (val));
-
-	return val;
-}
-
-static inline u64 kernel__etext_addr(void)
-{
-	u64 val;
-
-	asm volatile(ALTERNATIVE_CB("movz	%0, #0\n"
-				    "movk	%0, #0, lsl #16\n"
-				    "movk	%0, #0, lsl #32\n"
-				    "movk	%0, #0, lsl #48\n",
-				    kvm_get__etext)
-		     : "=r" (val));
-
-	return val;
-}
 
 static void handle_host_hcall(struct kvm_cpu_context *host_ctxt)
 {
 	DECLARE_REG(unsigned long, id, host_ctxt, 0);
-	u64 elr = read_sysreg_el2(SYS_ELR) - 4;
 	unsigned long hcall_min = 0;
 	hcall_t hfn;
 
-	/* Check for the provenance of the HC */
-	if (unlikely(elr < kernel__text_addr() || elr >= kernel__etext_addr()))
-		goto inval;
+	if (handle_host_dynamic_hcall(host_ctxt) == HCALL_HANDLED)
+		goto end;
 
 	/*
 	 * If pKVM has been initialised then reject any calls to the
@@ -1177,26 +1366,38 @@ static void handle_host_hcall(struct kvm_cpu_context *host_ctxt)
 
 	cpu_reg(host_ctxt, 0) = SMCCC_RET_SUCCESS;
 	hfn(host_ctxt);
+end:
+	trace_host_hcall(id, 0);
 
 	return;
 inval:
+	trace_host_hcall(id, 1);
 	cpu_reg(host_ctxt, 0) = SMCCC_RET_NOT_SUPPORTED;
-}
-
-static void default_host_smc_handler(struct kvm_cpu_context *host_ctxt)
-{
-	__kvm_hyp_host_forward_smc(host_ctxt);
 }
 
 static void handle_host_smc(struct kvm_cpu_context *host_ctxt)
 {
+	DECLARE_REG(u64, func_id, host_ctxt, 0);
+	struct pkvm_hyp_vcpu *hyp_vcpu;
 	bool handled;
+
+	hyp_vcpu = pkvm_get_loaded_hyp_vcpu();
+	if (hyp_vcpu && hyp_vcpu->vcpu.arch.fp_state == FP_STATE_GUEST_OWNED)
+		fpsimd_host_restore();
 
 	handled = kvm_host_psci_handler(host_ctxt);
 	if (!handled)
 		handled = kvm_host_ffa_handler(host_ctxt);
-	if (!handled)
-		default_host_smc_handler(host_ctxt);
+	if (!handled && smp_load_acquire(&default_host_smc_handler))
+		handled = default_host_smc_handler(host_ctxt);
+
+	trace_host_smc(func_id, !handled);
+
+	if (!handled) {
+		trace_hyp_exit();
+		__kvm_hyp_host_forward_smc(host_ctxt);
+		trace_hyp_enter();
+	}
 
 	/* SMC was trapped, move ELR past the current PC. */
 	kvm_skip_host_instr();
@@ -1205,6 +1406,8 @@ static void handle_host_smc(struct kvm_cpu_context *host_ctxt)
 void handle_trap(struct kvm_cpu_context *host_ctxt)
 {
 	u64 esr = read_sysreg_el2(SYS_ESR);
+
+	trace_hyp_enter();
 
 	switch (ESR_ELx_EC(esr)) {
 	case ESR_ELx_EC_HVC64:
@@ -1222,6 +1425,8 @@ void handle_trap(struct kvm_cpu_context *host_ctxt)
 		handle_host_mem_abort(host_ctxt);
 		break;
 	default:
-		BUG();
+		BUG_ON(!READ_ONCE(default_trap_handler) || !default_trap_handler(host_ctxt));
 	}
+
+	trace_hyp_exit();
 }

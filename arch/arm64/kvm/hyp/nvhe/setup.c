@@ -18,6 +18,7 @@
 #include <nvhe/mem_protect.h>
 #include <nvhe/mm.h>
 #include <nvhe/pkvm.h>
+#include <nvhe/serial.h>
 #include <nvhe/trap_handler.h>
 
 unsigned long hyp_nr_cpus;
@@ -29,7 +30,7 @@ phys_addr_t pvmfw_size;
 			 (unsigned long)__per_cpu_start)
 
 static void *vmemmap_base;
-static void *shadow_table_base;
+static void *vm_table_base;
 static void *hyp_pgt_base;
 static void *host_s2_pgt_base;
 static void *ffa_proxy_pages;
@@ -47,9 +48,9 @@ static int divide_memory_pool(void *virt, unsigned long size)
 	if (!vmemmap_base)
 		return -ENOMEM;
 
-	nr_pages = hyp_shadow_table_pages(sizeof(struct kvm_shadow_vm));
-	shadow_table_base = hyp_early_alloc_contig(nr_pages);
-	if (!shadow_table_base)
+	nr_pages = hyp_vm_table_pages();
+	vm_table_base = hyp_early_alloc_contig(nr_pages);
+	if (!vm_table_base)
 		return -ENOMEM;
 
 	nr_pages = hyp_s1_pgtable_pages();
@@ -66,6 +67,22 @@ static int divide_memory_pool(void *virt, unsigned long size)
 	ffa_proxy_pages = hyp_early_alloc_contig(nr_pages);
 	if (!ffa_proxy_pages)
 		return -ENOMEM;
+
+	return 0;
+}
+
+static int create_hyp_host_fp_mappings(void)
+{
+	void *start, *end;
+	int ret, i;
+
+	for (i = 0; i < hyp_nr_cpus; i++) {
+		start = (void *)kern_hyp_va(kvm_arm_hyp_host_fp_state[i]);
+		end = start + PAGE_ALIGN(pkvm_host_fp_state_size());
+		ret = pkvm_create_mappings(start, end, PAGE_HYP);
+		if (ret)
+			return ret;
+	}
 
 	return 0;
 }
@@ -119,18 +136,45 @@ static int recreate_hyp_mappings(phys_addr_t phys, unsigned long size,
 		return ret;
 
 	for (i = 0; i < hyp_nr_cpus; i++) {
+		struct kvm_nvhe_init_params *params = per_cpu_ptr(&kvm_init_params, i);
+		unsigned long hyp_addr;
+
 		start = (void *)kern_hyp_va(per_cpu_base[i]);
 		end = start + PAGE_ALIGN(hyp_percpu_size);
 		ret = pkvm_create_mappings(start, end, PAGE_HYP);
 		if (ret)
 			return ret;
 
-		end = (void *)per_cpu_ptr(&kvm_init_params, i)->stack_hyp_va;
-		start = end - PAGE_SIZE;
-		ret = pkvm_create_mappings(start, end, PAGE_HYP);
+		/*
+		 * Allocate a contiguous HYP private VA range for the stack
+		 * and guard page. The allocation is also aligned based on
+		 * the order of its size.
+		 */
+		ret = pkvm_alloc_private_va_range(NVHE_STACK_SIZE * 2, &hyp_addr);
 		if (ret)
 			return ret;
+
+		/*
+		 * Since the stack grows downwards, map the stack to the page
+		 * at the higher address and leave the lower guard page
+		 * unbacked.
+		 *
+		 * Any valid stack address now has the NVHE_STACK_SHIFT bit as 1
+		 * and addresses corresponding to the guard page have the
+		 * NVHE_STACK_SHIFT bit as 0 - this is used for overflow detection.
+		 */
+		hyp_spin_lock(&pkvm_pgd_lock);
+		ret = kvm_pgtable_hyp_map(&pkvm_pgtable, hyp_addr + NVHE_STACK_SIZE,
+					NVHE_STACK_SIZE, params->stack_pa, PAGE_HYP);
+		hyp_spin_unlock(&pkvm_pgd_lock);
+		if (ret)
+			return ret;
+
+		/* Update stack_hyp_va to end of the stack's private VA range */
+		params->stack_hyp_va = hyp_addr + (2 * NVHE_STACK_SIZE);
 	}
+
+	create_hyp_host_fp_mappings();
 
 	/*
 	 * Map the host sections RO in the hypervisor, but transfer the
@@ -142,13 +186,14 @@ static int recreate_hyp_mappings(phys_addr_t phys, unsigned long size,
 	 * the hyp_vmemmap is addressable.
 	 */
 	prot = pkvm_mkstate(PAGE_HYP_RO, PKVM_PAGE_SHARED_OWNED);
-	ret = pkvm_create_mappings(&kvm_vgic_global_state, &kvm_vgic_global_state + 1, prot);
+	ret = pkvm_create_mappings(&kvm_vgic_global_state,
+				   &kvm_vgic_global_state + 1, prot);
 	if (ret)
 		return ret;
 
 	start = hyp_phys_to_virt(pvmfw_base);
 	end = start + pvmfw_size;
-	prot = pkvm_mkstate(PAGE_HYP, PKVM_PAGE_OWNED);
+	prot = pkvm_mkstate(PAGE_HYP_RO, PKVM_PAGE_OWNED);
 	ret = pkvm_create_mappings(start, end, prot);
 	if (ret)
 		return ret;
@@ -211,7 +256,7 @@ static int fix_host_ownership_walker(u64 addr, u64 end, u32 level,
 	state = pkvm_getstate(kvm_pgtable_hyp_pte_prot(pte));
 	switch (state) {
 	case PKVM_PAGE_OWNED:
-		return host_stage2_set_owner_locked(phys, PAGE_SIZE, pkvm_hyp_id);
+		return host_stage2_set_owner_locked(phys, PAGE_SIZE, PKVM_ID_HYP);
 	case PKVM_PAGE_SHARED_OWNED:
 		prot = pkvm_mkstate(PKVM_HOST_MEM_PROT, PKVM_PAGE_SHARED_BORROWED);
 		break;
@@ -242,6 +287,29 @@ static int fix_hyp_pgtable_refcnt_walker(u64 addr, u64 end, u32 level,
 		mm_ops->get_page(ptep);
 
 	return 0;
+}
+
+static int pin_table_walker(u64 addr, u64 end, u32 level, kvm_pte_t *ptep,
+			    enum kvm_pgtable_walk_flags flag, void * const arg)
+{
+	struct kvm_pgtable_mm_ops *mm_ops = arg;
+	kvm_pte_t pte = *ptep;
+
+	if (kvm_pte_valid(pte))
+		mm_ops->get_page(kvm_pte_follow(pte, mm_ops));
+
+	return 0;
+}
+
+static int pin_host_tables(void)
+{
+	struct kvm_pgtable_walker walker = {
+		.cb	= pin_table_walker,
+		.flags	= KVM_PGTABLE_WALK_TABLE_POST,
+		.arg	= &host_mmu.mm_ops,
+	};
+
+	return kvm_pgtable_walk(&host_mmu.pgt, 0, BIT(host_mmu.pgt.ia_bits), &walker);
 }
 
 static int fix_host_ownership(void)
@@ -276,6 +344,25 @@ static int fix_hyp_pgtable_refcnt(void)
 				&walker);
 }
 
+static int unmap_protected_regions(void)
+{
+	struct pkvm_moveable_reg *reg;
+	int i, ret;
+
+	for (i = 0; i < pkvm_moveable_regs_nr; i++) {
+		reg = &pkvm_moveable_regs[i];
+		if (reg->type != PKVM_MREG_PROTECTED_RANGE)
+			continue;
+
+		ret = host_stage2_set_owner_locked(reg->start, reg->size,
+						   PKVM_ID_PROTECTED);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
 void __noreturn __pkvm_init_finalise(void)
 {
 	struct kvm_host_data *host_data = this_cpu_ptr(&kvm_host_data);
@@ -305,10 +392,6 @@ void __noreturn __pkvm_init_finalise(void)
 	};
 	pkvm_pgtable.mm_ops = &pkvm_pgtable_mm_ops;
 
-	ret = fix_host_ownership();
-	if (ret)
-		goto out;
-
 	ret = fix_hyp_pgtable_refcnt();
 	if (ret)
 		goto out;
@@ -317,11 +400,23 @@ void __noreturn __pkvm_init_finalise(void)
 	if (ret)
 		goto out;
 
+	ret = fix_host_ownership();
+	if (ret)
+		goto out;
+
+	ret = unmap_protected_regions();
+	if (ret)
+		goto out;
+
+	ret = pin_host_tables();
+	if (ret)
+		goto out;
+
 	ret = hyp_ffa_init(ffa_proxy_pages);
 	if (ret)
 		goto out;
 
-	hyp_shadow_table_init(shadow_table_base);
+	pkvm_hyp_vm_table_init(vm_table_base);
 out:
 	/*
 	 * We tail-called to here from handle___pkvm_init() and will not return,

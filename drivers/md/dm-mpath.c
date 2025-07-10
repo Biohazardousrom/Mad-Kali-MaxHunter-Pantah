@@ -29,7 +29,7 @@
 
 #define DM_MSG_PREFIX "multipath"
 #define DM_PG_INIT_DELAY_MSECS 2000
-#define DM_PG_INIT_DELAY_DEFAULT ((unsigned) -1)
+#define DM_PG_INIT_DELAY_DEFAULT ((unsigned int) -1)
 #define QUEUE_IF_NO_PATH_TIMEOUT_DEFAULT 0
 
 static unsigned long queue_if_no_path_timeout_secs = QUEUE_IF_NO_PATH_TIMEOUT_DEFAULT;
@@ -39,7 +39,7 @@ struct pgpath {
 	struct list_head list;
 
 	struct priority_group *pg;	/* Owning PG */
-	unsigned fail_count;		/* Cumulative failure count */
+	unsigned int fail_count;		/* Cumulative failure count */
 
 	struct dm_path path;
 	struct delayed_work activate_path;
@@ -59,8 +59,8 @@ struct priority_group {
 	struct multipath *m;		/* Owning multipath instance */
 	struct path_selector ps;
 
-	unsigned pg_num;		/* Reference number */
-	unsigned nr_pgpaths;		/* Number of paths in PG */
+	unsigned int pg_num;		/* Reference number */
+	unsigned int nr_pgpaths;		/* Number of paths in PG */
 	struct list_head pgpaths;
 
 	bool bypassed:1;		/* Temporarily bypass this PG? */
@@ -78,14 +78,14 @@ struct multipath {
 	struct priority_group *next_pg;	/* Switch to this PG if set */
 
 	atomic_t nr_valid_paths;	/* Total number of usable paths */
-	unsigned nr_priority_groups;
+	unsigned int nr_priority_groups;
 	struct list_head priority_groups;
 
 	const char *hw_handler_name;
 	char *hw_handler_params;
 	wait_queue_head_t pg_init_wait;	/* Wait for pg_init completion */
-	unsigned pg_init_retries;	/* Number of times to retry pg_init */
-	unsigned pg_init_delay_msecs;	/* Number of msecs before pg_init retry */
+	unsigned int pg_init_retries;	/* Number of times to retry pg_init */
+	unsigned int pg_init_delay_msecs;	/* Number of msecs before pg_init retry */
 	atomic_t pg_init_in_progress;	/* Only one pg_init allowed at once */
 	atomic_t pg_init_count;		/* Number of times pg_init called */
 
@@ -105,6 +105,7 @@ struct multipath {
 struct dm_mpath_io {
 	struct pgpath *pgpath;
 	size_t nr_bytes;
+	u64 start_time_ns;
 };
 
 typedef int (*action_fn) (struct pgpath *pgpath);
@@ -295,6 +296,7 @@ static void multipath_init_per_bio_data(struct bio *bio, struct dm_mpath_io **mp
 
 	mpio->nr_bytes = bio->bi_iter.bi_size;
 	mpio->pgpath = NULL;
+	mpio->start_time_ns = 0;
 	*mpio_p = mpio;
 
 	dm_bio_record(bio_details, bio);
@@ -395,7 +397,7 @@ static struct pgpath *choose_pgpath(struct multipath *m, size_t nr_bytes)
 	unsigned long flags;
 	struct priority_group *pg;
 	struct pgpath *pgpath;
-	unsigned bypassed = 1;
+	unsigned int bypassed = 1;
 
 	if (!atomic_read(&m->nr_valid_paths)) {
 		spin_lock_irqsave(&m->lock, flags);
@@ -530,7 +532,7 @@ static int multipath_clone_and_map(struct dm_target *ti, struct request *rq,
 
 	bdev = pgpath->path.dev->bdev;
 	q = bdev_get_queue(bdev);
-	clone = blk_get_request(q, rq->cmd_flags | REQ_NOMERGE,
+	clone = blk_mq_alloc_request(q, rq->cmd_flags | REQ_NOMERGE,
 			BLK_MQ_REQ_NOWAIT);
 	if (IS_ERR(clone)) {
 		/* EBUSY, ENODEV or EWOULDBLOCK: requeue */
@@ -550,7 +552,6 @@ static int multipath_clone_and_map(struct dm_target *ti, struct request *rq,
 		return DM_MAPIO_REQUEUE;
 	}
 	clone->bio = clone->biotail = NULL;
-	clone->rq_disk = bdev->bd_disk;
 	clone->cmd_flags |= REQ_FAILFAST_TRANSPORT;
 	*__clone = clone;
 
@@ -579,7 +580,7 @@ static void multipath_release_clone(struct request *clone,
 						    clone->io_start_time_ns);
 	}
 
-	blk_put_request(clone);
+	blk_mq_free_request(clone);
 }
 
 /*
@@ -647,6 +648,9 @@ static int __multipath_map_bio(struct multipath *m, struct bio *bio,
 	}
 
 	mpio->pgpath = pgpath;
+
+	if (dm_ps_use_hr_timer(pgpath->pg->ps.type))
+		mpio->start_time_ns = ktime_get_ns();
 
 	bio->bi_status = 0;
 	bio_set_dev(bio, pgpath->path.dev->bdev);
@@ -836,7 +840,7 @@ static int parse_path_selector(struct dm_arg_set *as, struct priority_group *pg,
 {
 	int r;
 	struct path_selector_type *pst;
-	unsigned ps_argc;
+	unsigned int ps_argc;
 
 	static const struct dm_arg _args[] = {
 		{0, 1024, "invalid number of path selector args"},
@@ -900,10 +904,7 @@ retain:
 	if (m->hw_handler_name) {
 		r = scsi_dh_attach(q, m->hw_handler_name);
 		if (r == -EBUSY) {
-			char b[BDEVNAME_SIZE];
-
-			printk(KERN_INFO "dm-mpath: retaining handler on device %s\n",
-			       bdevname(bdev, b));
+			DMINFO("retaining handler on device %pg", bdev);
 			goto retain;
 		}
 		if (r < 0) {
@@ -982,7 +983,7 @@ static struct priority_group *parse_priority_group(struct dm_arg_set *as,
 	};
 
 	int r;
-	unsigned i, nr_selector_args, nr_args;
+	unsigned int i, nr_selector_args, nr_args;
 	struct priority_group *pg;
 	struct dm_target *ti = m->ti;
 
@@ -1048,7 +1049,7 @@ static struct priority_group *parse_priority_group(struct dm_arg_set *as,
 
 static int parse_hw_handler(struct dm_arg_set *as, struct multipath *m)
 {
-	unsigned hw_argc;
+	unsigned int hw_argc;
 	int ret;
 	struct dm_target *ti = m->ti;
 
@@ -1085,7 +1086,7 @@ static int parse_hw_handler(struct dm_arg_set *as, struct multipath *m)
 			goto fail;
 		}
 		j = sprintf(p, "%d", hw_argc - 1);
-		for (i = 0, p+=j+1; i <= hw_argc - 2; i++, p+=j+1)
+		for (i = 0, p += j + 1; i <= hw_argc - 2; i++, p += j + 1)
 			j = sprintf(p, "%s", as->argv[i]);
 	}
 	dm_consume_args(as, hw_argc - 1);
@@ -1100,7 +1101,7 @@ fail:
 static int parse_features(struct dm_arg_set *as, struct multipath *m)
 {
 	int r;
-	unsigned argc;
+	unsigned int argc;
 	struct dm_target *ti = m->ti;
 	const char *arg_name;
 
@@ -1169,7 +1170,7 @@ static int parse_features(struct dm_arg_set *as, struct multipath *m)
 	return r;
 }
 
-static int multipath_ctr(struct dm_target *ti, unsigned argc, char **argv)
+static int multipath_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 {
 	/* target arguments */
 	static const struct dm_arg _args[] = {
@@ -1180,8 +1181,8 @@ static int multipath_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	int r;
 	struct multipath *m;
 	struct dm_arg_set as;
-	unsigned pg_count = 0;
-	unsigned next_pg_num;
+	unsigned int pg_count = 0;
+	unsigned int next_pg_num;
 	unsigned long flags;
 
 	as.argc = argc;
@@ -1223,7 +1224,7 @@ static int multipath_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	/* parse the priority groups */
 	while (as.argc) {
 		struct priority_group *pg;
-		unsigned nr_valid_paths = atomic_read(&m->nr_valid_paths);
+		unsigned int nr_valid_paths = atomic_read(&m->nr_valid_paths);
 
 		pg = parse_priority_group(&as, m);
 		if (IS_ERR(pg)) {
@@ -1253,7 +1254,6 @@ static int multipath_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 	ti->num_flush_bios = 1;
 	ti->num_discard_bios = 1;
-	ti->num_write_same_bios = 1;
 	ti->num_write_zeroes_bios = 1;
 	if (m->queue_mode == DM_TYPE_BIO_BASED)
 		ti->per_io_data_size = multipath_per_bio_data_size();
@@ -1365,7 +1365,7 @@ static int reinstate_path(struct pgpath *pgpath)
 	int r = 0, run_queue = 0;
 	unsigned long flags;
 	struct multipath *m = pgpath->pg->m;
-	unsigned nr_valid_paths;
+	unsigned int nr_valid_paths;
 
 	spin_lock_irqsave(&m->lock, flags);
 
@@ -1454,7 +1454,7 @@ static void bypass_pg(struct multipath *m, struct priority_group *pg,
 static int switch_pg_num(struct multipath *m, const char *pgstr)
 {
 	struct priority_group *pg;
-	unsigned pgnum;
+	unsigned int pgnum;
 	unsigned long flags;
 	char dummy;
 
@@ -1487,7 +1487,7 @@ static int switch_pg_num(struct multipath *m, const char *pgstr)
 static int bypass_pg_num(struct multipath *m, const char *pgstr, bool bypassed)
 {
 	struct priority_group *pg;
-	unsigned pgnum;
+	unsigned int pgnum;
 	char dummy;
 
 	if (!pgstr || (sscanf(pgstr, "%u%c", &pgnum, &dummy) != 1) || !pgnum ||
@@ -1718,7 +1718,8 @@ done:
 
 		if (ps->type->end_io)
 			ps->type->end_io(ps, &pgpath->path, mpio->nr_bytes,
-					 dm_start_time_ns_from_clone(clone));
+					 (mpio->start_time_ns ?:
+					  dm_start_time_ns_from_clone(clone)));
 	}
 
 	return r;
@@ -1788,14 +1789,14 @@ static void multipath_resume(struct dm_target *ti)
  *      num_paths num_selector_args [path_dev [selector_args]* ]+ ]+
  */
 static void multipath_status(struct dm_target *ti, status_type_t type,
-			     unsigned status_flags, char *result, unsigned maxlen)
+			     unsigned int status_flags, char *result, unsigned int maxlen)
 {
-	int sz = 0;
+	int sz = 0, pg_counter, pgpath_counter;
 	unsigned long flags;
 	struct multipath *m = ti->private;
 	struct priority_group *pg;
 	struct pgpath *p;
-	unsigned pg_num;
+	unsigned int pg_num;
 	char state;
 
 	spin_lock_irqsave(&m->lock, flags);
@@ -1904,13 +1905,51 @@ static void multipath_status(struct dm_target *ti, status_type_t type,
 			}
 		}
 		break;
+
+	case STATUSTYPE_IMA:
+		sz = 0; /*reset the result pointer*/
+
+		DMEMIT_TARGET_NAME_VERSION(ti->type);
+		DMEMIT(",nr_priority_groups=%u", m->nr_priority_groups);
+
+		pg_counter = 0;
+		list_for_each_entry(pg, &m->priority_groups, list) {
+			if (pg->bypassed)
+				state = 'D';	/* Disabled */
+			else if (pg == m->current_pg)
+				state = 'A';	/* Currently Active */
+			else
+				state = 'E';	/* Enabled */
+			DMEMIT(",pg_state_%d=%c", pg_counter, state);
+			DMEMIT(",nr_pgpaths_%d=%u", pg_counter, pg->nr_pgpaths);
+			DMEMIT(",path_selector_name_%d=%s", pg_counter, pg->ps.type->name);
+
+			pgpath_counter = 0;
+			list_for_each_entry(p, &pg->pgpaths, list) {
+				DMEMIT(",path_name_%d_%d=%s,is_active_%d_%d=%c,fail_count_%d_%d=%u",
+				       pg_counter, pgpath_counter, p->path.dev->name,
+				       pg_counter, pgpath_counter, p->is_active ? 'A' : 'F',
+				       pg_counter, pgpath_counter, p->fail_count);
+				if (pg->ps.type->status) {
+					DMEMIT(",path_selector_status_%d_%d=",
+					       pg_counter, pgpath_counter);
+					sz += pg->ps.type->status(&pg->ps, &p->path,
+								  type, result + sz,
+								  maxlen - sz);
+				}
+				pgpath_counter++;
+			}
+			pg_counter++;
+		}
+		DMEMIT(";");
+		break;
 	}
 
 	spin_unlock_irqrestore(&m->lock, flags);
 }
 
-static int multipath_message(struct dm_target *ti, unsigned argc, char **argv,
-			     char *result, unsigned maxlen)
+static int multipath_message(struct dm_target *ti, unsigned int argc, char **argv,
+			     char *result, unsigned int maxlen)
 {
 	int r = -EINVAL;
 	struct dm_dev *dev;
@@ -2023,7 +2062,7 @@ static int multipath_prepare_ioctl(struct dm_target *ti,
 	/*
 	 * Only pass ioctls through if the device sizes match exactly.
 	 */
-	if (!r && ti->len != i_size_read((*bdev)->bd_inode) >> SECTOR_SHIFT)
+	if (!r && ti->len != bdev_nr_sectors((*bdev)))
 		return 1;
 	return r;
 }

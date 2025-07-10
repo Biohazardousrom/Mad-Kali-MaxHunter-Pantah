@@ -13,16 +13,34 @@
 #include <asm/kvm_pgtable.h>
 #include <asm/sysreg.h>
 
-/* Maximum number of protected VMs that can be created. */
+/*
+ * Stores the sve state for the host in protected mode.
+ */
+struct kvm_host_sve_state {
+	u64 zcr_el1;
+
+	/*
+	 * Ordering is important since __sve_save_state/__sve_restore_state
+	 * relies on it.
+	 */
+	u32 fpsr;
+	u32 fpcr;
+
+	/* Must be SVE_VQ_BYTES (128 bit) aligned. */
+	char sve_regs[];
+};
+
+/* Maximum number of VMs that can co-exist under pKVM. */
 #define KVM_MAX_PVMS 255
 
 #define HYP_MEMBLOCK_REGIONS 128
 #define PVMFW_INVALID_LOAD_ADDR	(-1)
 
-int kvm_arm_vm_ioctl_pkvm(struct kvm *kvm, struct kvm_enable_cap *cap);
-int kvm_init_pvm(struct kvm *kvm, unsigned long type);
-int create_el2_shadow(struct kvm *kvm);
-void kvm_shadow_destroy(struct kvm *kvm);
+int pkvm_vm_ioctl_enable_cap(struct kvm *kvm,struct kvm_enable_cap *cap);
+int pkvm_init_host_vm(struct kvm *kvm, unsigned long type);
+int pkvm_create_hyp_vm(struct kvm *kvm);
+void pkvm_destroy_hyp_vm(struct kvm *kvm);
+void pkvm_host_reclaim_page(struct kvm *host_kvm, phys_addr_t ipa);
 
 /*
  * Definitions for features to be allowed or restricted for guest virtual
@@ -47,12 +65,17 @@ void kvm_shadow_destroy(struct kvm *kvm);
 /*
  * Allow for protected VMs:
  * - Floating-point and Advanced SIMD
+ * - GICv3(+) system register interface
  * - Data Independent Timing
+ * - Spectre/Meltdown Mitigation
  */
 #define PVM_ID_AA64PFR0_ALLOW (\
-	ARM64_FEATURE_MASK(ID_AA64PFR0_FP) | \
-	ARM64_FEATURE_MASK(ID_AA64PFR0_ASIMD) | \
-	ARM64_FEATURE_MASK(ID_AA64PFR0_DIT) \
+	ARM64_FEATURE_MASK(ID_AA64PFR0_EL1_FP) | \
+	ARM64_FEATURE_MASK(ID_AA64PFR0_EL1_AdvSIMD) | \
+	ARM64_FEATURE_MASK(ID_AA64PFR0_EL1_GIC) | \
+	ARM64_FEATURE_MASK(ID_AA64PFR0_EL1_DIT) | \
+	ARM64_FEATURE_MASK(ID_AA64PFR0_EL1_CSV2) | \
+	ARM64_FEATURE_MASK(ID_AA64PFR0_EL1_CSV3) \
 	)
 
 /*
@@ -64,11 +87,11 @@ void kvm_shadow_destroy(struct kvm *kvm);
  *	Supported by KVM
  */
 #define PVM_ID_AA64PFR0_RESTRICT_UNSIGNED (\
-	FIELD_PREP(ARM64_FEATURE_MASK(ID_AA64PFR0_EL0), ID_AA64PFR0_ELx_64BIT_ONLY) | \
-	FIELD_PREP(ARM64_FEATURE_MASK(ID_AA64PFR0_EL1), ID_AA64PFR0_ELx_64BIT_ONLY) | \
-	FIELD_PREP(ARM64_FEATURE_MASK(ID_AA64PFR0_EL2), ID_AA64PFR0_ELx_64BIT_ONLY) | \
-	FIELD_PREP(ARM64_FEATURE_MASK(ID_AA64PFR0_EL3), ID_AA64PFR0_ELx_64BIT_ONLY) | \
-	FIELD_PREP(ARM64_FEATURE_MASK(ID_AA64PFR0_RAS), ID_AA64PFR0_RAS_V1) \
+	FIELD_PREP(ARM64_FEATURE_MASK(ID_AA64PFR0_EL1_EL0), ID_AA64PFR0_EL1_ELx_64BIT_ONLY) | \
+	FIELD_PREP(ARM64_FEATURE_MASK(ID_AA64PFR0_EL1_EL1), ID_AA64PFR0_EL1_ELx_64BIT_ONLY) | \
+	FIELD_PREP(ARM64_FEATURE_MASK(ID_AA64PFR0_EL1_EL2), ID_AA64PFR0_EL1_ELx_64BIT_ONLY) | \
+	FIELD_PREP(ARM64_FEATURE_MASK(ID_AA64PFR0_EL1_EL3), ID_AA64PFR0_EL1_ELx_64BIT_ONLY) | \
+	FIELD_PREP(ARM64_FEATURE_MASK(ID_AA64PFR0_EL1_RAS), ID_AA64PFR0_EL1_RAS_IMP) \
 	)
 
 /*
@@ -77,8 +100,8 @@ void kvm_shadow_destroy(struct kvm *kvm);
  * - Speculative Store Bypassing
  */
 #define PVM_ID_AA64PFR1_ALLOW (\
-	ARM64_FEATURE_MASK(ID_AA64PFR1_BT) | \
-	ARM64_FEATURE_MASK(ID_AA64PFR1_SSBS) \
+	ARM64_FEATURE_MASK(ID_AA64PFR1_EL1_BT) | \
+	ARM64_FEATURE_MASK(ID_AA64PFR1_EL1_SSBS) \
 	)
 
 /*
@@ -89,10 +112,10 @@ void kvm_shadow_destroy(struct kvm *kvm);
  * - Non-context synchronizing exception entry and exit
  */
 #define PVM_ID_AA64MMFR0_ALLOW (\
-	ARM64_FEATURE_MASK(ID_AA64MMFR0_BIGENDEL) | \
-	ARM64_FEATURE_MASK(ID_AA64MMFR0_SNSMEM) | \
-	ARM64_FEATURE_MASK(ID_AA64MMFR0_BIGENDEL0) | \
-	ARM64_FEATURE_MASK(ID_AA64MMFR0_EXS) \
+	ARM64_FEATURE_MASK(ID_AA64MMFR0_EL1_BIGEND) | \
+	ARM64_FEATURE_MASK(ID_AA64MMFR0_EL1_SNSMEM) | \
+	ARM64_FEATURE_MASK(ID_AA64MMFR0_EL1_BIGENDEL0) | \
+	ARM64_FEATURE_MASK(ID_AA64MMFR0_EL1_EXS) \
 	)
 
 /*
@@ -101,8 +124,8 @@ void kvm_shadow_destroy(struct kvm *kvm);
  * - 16-bit ASID
  */
 #define PVM_ID_AA64MMFR0_RESTRICT_UNSIGNED (\
-	FIELD_PREP(ARM64_FEATURE_MASK(ID_AA64MMFR0_PARANGE), ID_AA64MMFR0_PARANGE_40) | \
-	FIELD_PREP(ARM64_FEATURE_MASK(ID_AA64MMFR0_ASID), ID_AA64MMFR0_ASID_16) \
+	FIELD_PREP(ARM64_FEATURE_MASK(ID_AA64MMFR0_EL1_PARANGE), ID_AA64MMFR0_EL1_PARANGE_40) | \
+	FIELD_PREP(ARM64_FEATURE_MASK(ID_AA64MMFR0_EL1_ASIDBITS), ID_AA64MMFR0_EL1_ASIDBITS_16) \
 	)
 
 /*
@@ -115,12 +138,12 @@ void kvm_shadow_destroy(struct kvm *kvm);
  * - Enhanced Translation Synchronization
  */
 #define PVM_ID_AA64MMFR1_ALLOW (\
-	ARM64_FEATURE_MASK(ID_AA64MMFR1_HADBS) | \
-	ARM64_FEATURE_MASK(ID_AA64MMFR1_VMIDBITS) | \
-	ARM64_FEATURE_MASK(ID_AA64MMFR1_HPD) | \
-	ARM64_FEATURE_MASK(ID_AA64MMFR1_PAN) | \
-	ARM64_FEATURE_MASK(ID_AA64MMFR1_SPECSEI) | \
-	ARM64_FEATURE_MASK(ID_AA64MMFR1_ETS) \
+	ARM64_FEATURE_MASK(ID_AA64MMFR1_EL1_HAFDBS) | \
+	ARM64_FEATURE_MASK(ID_AA64MMFR1_EL1_VMIDBits) | \
+	ARM64_FEATURE_MASK(ID_AA64MMFR1_EL1_HPDS) | \
+	ARM64_FEATURE_MASK(ID_AA64MMFR1_EL1_PAN) | \
+	ARM64_FEATURE_MASK(ID_AA64MMFR1_EL1_SpecSEI) | \
+	ARM64_FEATURE_MASK(ID_AA64MMFR1_EL1_ETS) \
 	)
 
 /*
@@ -135,14 +158,14 @@ void kvm_shadow_destroy(struct kvm *kvm);
  * - E0PDx mechanism
  */
 #define PVM_ID_AA64MMFR2_ALLOW (\
-	ARM64_FEATURE_MASK(ID_AA64MMFR2_CNP) | \
-	ARM64_FEATURE_MASK(ID_AA64MMFR2_UAO) | \
-	ARM64_FEATURE_MASK(ID_AA64MMFR2_IESB) | \
-	ARM64_FEATURE_MASK(ID_AA64MMFR2_AT) | \
-	ARM64_FEATURE_MASK(ID_AA64MMFR2_IDS) | \
-	ARM64_FEATURE_MASK(ID_AA64MMFR2_TTL) | \
-	ARM64_FEATURE_MASK(ID_AA64MMFR2_BBM) | \
-	ARM64_FEATURE_MASK(ID_AA64MMFR2_E0PD) \
+	ARM64_FEATURE_MASK(ID_AA64MMFR2_EL1_CnP) | \
+	ARM64_FEATURE_MASK(ID_AA64MMFR2_EL1_UAO) | \
+	ARM64_FEATURE_MASK(ID_AA64MMFR2_EL1_IESB) | \
+	ARM64_FEATURE_MASK(ID_AA64MMFR2_EL1_AT) | \
+	ARM64_FEATURE_MASK(ID_AA64MMFR2_EL1_IDS) | \
+	ARM64_FEATURE_MASK(ID_AA64MMFR2_EL1_TTL) | \
+	ARM64_FEATURE_MASK(ID_AA64MMFR2_EL1_BBM) | \
+	ARM64_FEATURE_MASK(ID_AA64MMFR2_EL1_E0PD) \
 	)
 
 /*
@@ -174,37 +197,42 @@ void kvm_shadow_destroy(struct kvm *kvm);
  * No restrictions on instructions implemented in AArch64.
  */
 #define PVM_ID_AA64ISAR0_ALLOW (\
-	ARM64_FEATURE_MASK(ID_AA64ISAR0_AES) | \
-	ARM64_FEATURE_MASK(ID_AA64ISAR0_SHA1) | \
-	ARM64_FEATURE_MASK(ID_AA64ISAR0_SHA2) | \
-	ARM64_FEATURE_MASK(ID_AA64ISAR0_CRC32) | \
-	ARM64_FEATURE_MASK(ID_AA64ISAR0_ATOMICS) | \
-	ARM64_FEATURE_MASK(ID_AA64ISAR0_RDM) | \
-	ARM64_FEATURE_MASK(ID_AA64ISAR0_SHA3) | \
-	ARM64_FEATURE_MASK(ID_AA64ISAR0_SM3) | \
-	ARM64_FEATURE_MASK(ID_AA64ISAR0_SM4) | \
-	ARM64_FEATURE_MASK(ID_AA64ISAR0_DP) | \
-	ARM64_FEATURE_MASK(ID_AA64ISAR0_FHM) | \
-	ARM64_FEATURE_MASK(ID_AA64ISAR0_TS) | \
-	ARM64_FEATURE_MASK(ID_AA64ISAR0_TLB) | \
-	ARM64_FEATURE_MASK(ID_AA64ISAR0_RNDR) \
+	ARM64_FEATURE_MASK(ID_AA64ISAR0_EL1_AES) | \
+	ARM64_FEATURE_MASK(ID_AA64ISAR0_EL1_SHA1) | \
+	ARM64_FEATURE_MASK(ID_AA64ISAR0_EL1_SHA2) | \
+	ARM64_FEATURE_MASK(ID_AA64ISAR0_EL1_CRC32) | \
+	ARM64_FEATURE_MASK(ID_AA64ISAR0_EL1_ATOMIC) | \
+	ARM64_FEATURE_MASK(ID_AA64ISAR0_EL1_RDM) | \
+	ARM64_FEATURE_MASK(ID_AA64ISAR0_EL1_SHA3) | \
+	ARM64_FEATURE_MASK(ID_AA64ISAR0_EL1_SM3) | \
+	ARM64_FEATURE_MASK(ID_AA64ISAR0_EL1_SM4) | \
+	ARM64_FEATURE_MASK(ID_AA64ISAR0_EL1_DP) | \
+	ARM64_FEATURE_MASK(ID_AA64ISAR0_EL1_FHM) | \
+	ARM64_FEATURE_MASK(ID_AA64ISAR0_EL1_TS) | \
+	ARM64_FEATURE_MASK(ID_AA64ISAR0_EL1_TLB) | \
+	ARM64_FEATURE_MASK(ID_AA64ISAR0_EL1_RNDR) \
 	)
 
 #define PVM_ID_AA64ISAR1_ALLOW (\
-	ARM64_FEATURE_MASK(ID_AA64ISAR1_DPB) | \
-	ARM64_FEATURE_MASK(ID_AA64ISAR1_APA) | \
-	ARM64_FEATURE_MASK(ID_AA64ISAR1_API) | \
-	ARM64_FEATURE_MASK(ID_AA64ISAR1_JSCVT) | \
-	ARM64_FEATURE_MASK(ID_AA64ISAR1_FCMA) | \
-	ARM64_FEATURE_MASK(ID_AA64ISAR1_LRCPC) | \
-	ARM64_FEATURE_MASK(ID_AA64ISAR1_GPA) | \
-	ARM64_FEATURE_MASK(ID_AA64ISAR1_GPI) | \
-	ARM64_FEATURE_MASK(ID_AA64ISAR1_FRINTTS) | \
-	ARM64_FEATURE_MASK(ID_AA64ISAR1_SB) | \
-	ARM64_FEATURE_MASK(ID_AA64ISAR1_SPECRES) | \
-	ARM64_FEATURE_MASK(ID_AA64ISAR1_BF16) | \
-	ARM64_FEATURE_MASK(ID_AA64ISAR1_DGH) | \
-	ARM64_FEATURE_MASK(ID_AA64ISAR1_I8MM) \
+	ARM64_FEATURE_MASK(ID_AA64ISAR1_EL1_DPB) | \
+	ARM64_FEATURE_MASK(ID_AA64ISAR1_EL1_APA) | \
+	ARM64_FEATURE_MASK(ID_AA64ISAR1_EL1_API) | \
+	ARM64_FEATURE_MASK(ID_AA64ISAR1_EL1_JSCVT) | \
+	ARM64_FEATURE_MASK(ID_AA64ISAR1_EL1_FCMA) | \
+	ARM64_FEATURE_MASK(ID_AA64ISAR1_EL1_LRCPC) | \
+	ARM64_FEATURE_MASK(ID_AA64ISAR1_EL1_GPA) | \
+	ARM64_FEATURE_MASK(ID_AA64ISAR1_EL1_GPI) | \
+	ARM64_FEATURE_MASK(ID_AA64ISAR1_EL1_FRINTTS) | \
+	ARM64_FEATURE_MASK(ID_AA64ISAR1_EL1_SB) | \
+	ARM64_FEATURE_MASK(ID_AA64ISAR1_EL1_SPECRES) | \
+	ARM64_FEATURE_MASK(ID_AA64ISAR1_EL1_BF16) | \
+	ARM64_FEATURE_MASK(ID_AA64ISAR1_EL1_DGH) | \
+	ARM64_FEATURE_MASK(ID_AA64ISAR1_EL1_I8MM) \
+	)
+
+#define PVM_ID_AA64ISAR2_ALLOW (\
+	ARM64_FEATURE_MASK(ID_AA64ISAR2_EL1_GPA3) | \
+	ARM64_FEATURE_MASK(ID_AA64ISAR2_EL1_APA3) \
 	)
 
 /*
@@ -212,7 +240,7 @@ void kvm_shadow_destroy(struct kvm *kvm);
  */
 static inline int pkvm_get_max_brps(void)
 {
-	int num = FIELD_GET(ARM64_FEATURE_MASK(ID_AA64DFR0_BRPS),
+	int num = FIELD_GET(ARM64_FEATURE_MASK(ID_AA64DFR0_EL1_BRPs),
 			    PVM_ID_AA64DFR0_ALLOW);
 
 	/*
@@ -228,11 +256,26 @@ static inline int pkvm_get_max_brps(void)
  */
 static inline int pkvm_get_max_wrps(void)
 {
-	int num = FIELD_GET(ARM64_FEATURE_MASK(ID_AA64DFR0_WRPS),
+	int num = FIELD_GET(ARM64_FEATURE_MASK(ID_AA64DFR0_EL1_WRPs),
 			    PVM_ID_AA64DFR0_ALLOW);
 
 	return num ? num + 1 : 0;
 }
+
+enum pkvm_moveable_reg_type {
+	PKVM_MREG_MEMORY,
+	PKVM_MREG_PROTECTED_RANGE,
+};
+
+struct pkvm_moveable_reg {
+	phys_addr_t start;
+	u64 size;
+	enum pkvm_moveable_reg_type type;
+};
+
+#define PKVM_NR_MOVEABLE_REGS 512
+extern struct pkvm_moveable_reg kvm_nvhe_sym(pkvm_moveable_regs)[];
+extern unsigned int kvm_nvhe_sym(pkvm_moveable_regs_nr);
 
 extern struct memblock_region kvm_nvhe_sym(hyp_memory)[];
 extern unsigned int kvm_nvhe_sym(hyp_memblock_nr);
@@ -266,9 +309,9 @@ static inline unsigned long hyp_vmemmap_pages(size_t vmemmap_entry_size)
 	return res >> PAGE_SHIFT;
 }
 
-static inline unsigned long hyp_shadow_table_pages(size_t shadow_entry_size)
+static inline unsigned long hyp_vm_table_pages(void)
 {
-	return PAGE_ALIGN(KVM_MAX_PVMS * shadow_entry_size) >> PAGE_SHIFT;
+	return PAGE_ALIGN(KVM_MAX_PVMS * sizeof(void *)) >> PAGE_SHIFT;
 }
 
 static inline unsigned long __hyp_pgtable_max_pages(unsigned long nr_pages)
@@ -284,27 +327,28 @@ static inline unsigned long __hyp_pgtable_max_pages(unsigned long nr_pages)
 	return total;
 }
 
-static inline unsigned long __hyp_pgtable_total_pages(void)
+static inline unsigned long __hyp_pgtable_moveable_regs_pages(void)
 {
 	unsigned long res = 0, i;
 
-	/* Cover all of memory with page-granularity */
-	for (i = 0; i < kvm_nvhe_sym(hyp_memblock_nr); i++) {
-		struct memblock_region *reg = &kvm_nvhe_sym(hyp_memory)[i];
+	/* Cover all of moveable regions with page-granularity */
+	for (i = 0; i < kvm_nvhe_sym(pkvm_moveable_regs_nr); i++) {
+		struct pkvm_moveable_reg *reg = &kvm_nvhe_sym(pkvm_moveable_regs)[i];
 		res += __hyp_pgtable_max_pages(reg->size >> PAGE_SHIFT);
 	}
 
 	return res;
 }
 
+#define __PKVM_PRIVATE_SZ SZ_1G
+
 static inline unsigned long hyp_s1_pgtable_pages(void)
 {
 	unsigned long res;
 
-	res = __hyp_pgtable_total_pages();
+	res = __hyp_pgtable_moveable_regs_pages();
 
-	/* Allow 1 GiB for private mappings */
-	res += __hyp_pgtable_max_pages(SZ_1G >> PAGE_SHIFT);
+	res += __hyp_pgtable_max_pages(__PKVM_PRIVATE_SZ >> PAGE_SHIFT);
 
 	return res;
 }
@@ -317,9 +361,9 @@ static inline unsigned long host_s2_pgtable_pages(void)
 	 * Include an extra 16 pages to safely upper-bound the worst case of
 	 * concatenated pgds.
 	 */
-	res = __hyp_pgtable_total_pages() + 16;
+	res = __hyp_pgtable_moveable_regs_pages() + 16;
 
-	/* Allow 1 GiB for MMIO mappings */
+	/* Allow 1 GiB for non-moveable regions */
 	res += __hyp_pgtable_max_pages(SZ_1G >> PAGE_SHIFT);
 
 	return res;
@@ -359,6 +403,15 @@ static inline unsigned long hyp_ffa_proxy_pages(void)
 
 	/* Plus a page each for the hypervisor's RX and TX mailboxes. */
 	return (2 * KVM_FFA_MBOX_NR_PAGES) + DIV_ROUND_UP(desc_max, PAGE_SIZE);
+}
+
+static inline size_t pkvm_host_fp_state_size(void)
+{
+	if (system_supports_sve())
+		return size_add(sizeof(struct kvm_host_sve_state),
+		       SVE_SIG_REGS_SIZE(sve_vq_from_vl(kvm_host_sve_max_vl)));
+	else
+		return sizeof(struct user_fpsimd_state);
 }
 
 #endif	/* __ARM64_KVM_PKVM_H__ */

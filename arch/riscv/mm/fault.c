@@ -13,14 +13,31 @@
 #include <linux/perf_event.h>
 #include <linux/signal.h>
 #include <linux/uaccess.h>
+#include <linux/kprobes.h>
+#include <linux/kfence.h>
 
 #include <asm/ptrace.h>
 #include <asm/tlbflush.h>
 
 #include "../kernel/head.h"
 
+static void die_kernel_fault(const char *msg, unsigned long addr,
+		struct pt_regs *regs)
+{
+	bust_spinlocks(1);
+
+	pr_alert("Unable to handle kernel %s at virtual address " REG_FMT "\n", msg,
+		addr);
+
+	bust_spinlocks(0);
+	die(regs, "Oops");
+	make_task_dead(SIGKILL);
+}
+
 static inline void no_context(struct pt_regs *regs, unsigned long addr)
 {
+	const char *msg;
+
 	/* Are we prepared to handle this kernel fault? */
 	if (fixup_exception(regs))
 		return;
@@ -29,12 +46,16 @@ static inline void no_context(struct pt_regs *regs, unsigned long addr)
 	 * Oops. The kernel tried to access some bad page. We'll have to
 	 * terminate things with extreme prejudice.
 	 */
-	bust_spinlocks(1);
-	pr_alert("Unable to handle kernel %s at virtual address " REG_FMT "\n",
-		(addr < PAGE_SIZE) ? "NULL pointer dereference" :
-		"paging request", addr);
-	die(regs, "Oops");
-	make_task_dead(SIGKILL);
+	if (addr < PAGE_SIZE)
+		msg = "NULL pointer dereference";
+	else {
+		if (kfence_handle_page_fault(addr, regs->cause == EXC_STORE_PAGE_FAULT, regs))
+			return;
+
+		msg = "paging request";
+	}
+
+	die_kernel_fault(msg, addr, regs);
 }
 
 static inline void mm_fault_error(struct pt_regs *regs, unsigned long addr, vm_fault_t fault)
@@ -62,13 +83,13 @@ static inline void mm_fault_error(struct pt_regs *regs, unsigned long addr, vm_f
 	BUG();
 }
 
-static inline void bad_area(struct pt_regs *regs, struct mm_struct *mm, int code, unsigned long addr)
+static inline void
+bad_area_nosemaphore(struct pt_regs *regs, int code, unsigned long addr)
 {
 	/*
 	 * Something tried to access memory that isn't in our memory map.
 	 * Fix it, but check if it's kernel or user first.
 	 */
-	mmap_read_unlock(mm);
 	/* User mode accesses just cause a SIGSEGV */
 	if (user_mode(regs)) {
 		do_trap(regs, SIGSEGV, code, addr);
@@ -78,12 +99,21 @@ static inline void bad_area(struct pt_regs *regs, struct mm_struct *mm, int code
 	no_context(regs, addr);
 }
 
+static inline void
+bad_area(struct pt_regs *regs, struct mm_struct *mm, int code,
+	 unsigned long addr)
+{
+	mmap_read_unlock(mm);
+
+	bad_area_nosemaphore(regs, code, addr);
+}
+
 static inline void vmalloc_fault(struct pt_regs *regs, int code, unsigned long addr)
 {
 	pgd_t *pgd, *pgd_k;
-	pud_t *pud, *pud_k;
-	p4d_t *p4d, *p4d_k;
-	pmd_t *pmd, *pmd_k;
+	pud_t *pud_k;
+	p4d_t *p4d_k;
+	pmd_t *pmd_k;
 	pte_t *pte_k;
 	int index;
 	unsigned long pfn;
@@ -111,14 +141,12 @@ static inline void vmalloc_fault(struct pt_regs *regs, int code, unsigned long a
 	}
 	set_pgd(pgd, *pgd_k);
 
-	p4d = p4d_offset(pgd, addr);
 	p4d_k = p4d_offset(pgd_k, addr);
 	if (!p4d_present(*p4d_k)) {
 		no_context(regs, addr);
 		return;
 	}
 
-	pud = pud_offset(p4d, addr);
 	pud_k = pud_offset(p4d_k, addr);
 	if (!pud_present(*pud_k)) {
 		no_context(regs, addr);
@@ -129,13 +157,11 @@ static inline void vmalloc_fault(struct pt_regs *regs, int code, unsigned long a
 	 * Since the vmalloc area is global, it is unnecessary
 	 * to copy individual PTEs
 	 */
-	pmd = pmd_offset(pud, addr);
 	pmd_k = pmd_offset(pud_k, addr);
 	if (!pmd_present(*pmd_k)) {
 		no_context(regs, addr);
 		return;
 	}
-	set_pmd(pmd, *pmd_k);
 
 	/*
 	 * Make sure the actual PTE exists as well to
@@ -203,6 +229,9 @@ asmlinkage void do_page_fault(struct pt_regs *regs)
 	tsk = current;
 	mm = tsk->mm;
 
+	if (kprobe_page_fault(regs, cause))
+		return;
+
 	/*
 	 * Fault-in kernel-space virtual memory on-demand.
 	 * The 'reference' page table is init_mm.pgd.
@@ -212,11 +241,24 @@ asmlinkage void do_page_fault(struct pt_regs *regs)
 	 * only copy the information from the master page table,
 	 * nothing more.
 	 */
-	if (unlikely((addr >= VMALLOC_START) && (addr <= VMALLOC_END))) {
+	if (unlikely((addr >= VMALLOC_START) && (addr < VMALLOC_END))) {
 		vmalloc_fault(regs, code, addr);
 		return;
 	}
 
+#ifdef CONFIG_64BIT
+	/*
+	 * Modules in 64bit kernels lie in their own virtual region which is not
+	 * in the vmalloc region, but dealing with page faults in this region
+	 * or the vmalloc region amounts to doing the same thing: checking that
+	 * the mapping exists in init_mm.pgd and updating user page table, so
+	 * just use vmalloc_fault.
+	 */
+	if (unlikely(addr >= MODULES_VADDR && addr < MODULES_END)) {
+		vmalloc_fault(regs, code, addr);
+		return;
+	}
+#endif
 	/* Enable interrupts if they were enabled in the parent context. */
 	if (likely(regs->status & SR_PIE))
 		local_irq_enable();
@@ -226,6 +268,7 @@ asmlinkage void do_page_fault(struct pt_regs *regs)
 	 * in an atomic region, then we must not take the fault.
 	 */
 	if (unlikely(faulthandler_disabled() || !mm)) {
+		tsk->thread.bad_cause = cause;
 		no_context(regs, addr);
 		return;
 	}
@@ -233,27 +276,55 @@ asmlinkage void do_page_fault(struct pt_regs *regs)
 	if (user_mode(regs))
 		flags |= FAULT_FLAG_USER;
 
+	if (!user_mode(regs) && addr < TASK_SIZE && unlikely(!(regs->status & SR_SUM))) {
+		if (fixup_exception(regs))
+			return;
+
+		die_kernel_fault("access to user memory without uaccess routines", addr, regs);
+	}
+
 	perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS, 1, regs, addr);
 
 	if (cause == EXC_STORE_PAGE_FAULT)
 		flags |= FAULT_FLAG_WRITE;
 	else if (cause == EXC_INST_PAGE_FAULT)
 		flags |= FAULT_FLAG_INSTRUCTION;
+	if (!(flags & FAULT_FLAG_USER))
+		goto lock_mmap;
+
+	vma = lock_vma_under_rcu(mm, addr);
+	if (!vma)
+		goto lock_mmap;
+
+	if (unlikely(access_error(cause, vma))) {
+		vma_end_read(vma);
+		goto lock_mmap;
+	}
+
+	fault = handle_mm_fault(vma, addr, flags | FAULT_FLAG_VMA_LOCK, regs);
+	if (!(fault & (VM_FAULT_RETRY | VM_FAULT_COMPLETED)))
+		vma_end_read(vma);
+
+	if (!(fault & VM_FAULT_RETRY)) {
+		count_vm_vma_lock_event(VMA_LOCK_SUCCESS);
+		goto done;
+	}
+	count_vm_vma_lock_event(VMA_LOCK_RETRY);
+	if (fault & VM_FAULT_MAJOR)
+		flags |= FAULT_FLAG_TRIED;
+
+	if (fault_signal_pending(fault, regs)) {
+		if (!user_mode(regs))
+			no_context(regs, addr);
+		return;
+	}
+lock_mmap:
+
 retry:
-	mmap_read_lock(mm);
-	vma = find_vma(mm, addr);
+	vma = lock_mm_and_find_vma(mm, addr, regs);
 	if (unlikely(!vma)) {
-		bad_area(regs, mm, code, addr);
-		return;
-	}
-	if (likely(vma->vm_start <= addr))
-		goto good_area;
-	if (unlikely(!(vma->vm_flags & VM_GROWSDOWN))) {
-		bad_area(regs, mm, code, addr);
-		return;
-	}
-	if (unlikely(expand_stack(vma, addr))) {
-		bad_area(regs, mm, code, addr);
+		tsk->thread.bad_cause = cause;
+		bad_area_nosemaphore(regs, code, addr);
 		return;
 	}
 
@@ -261,10 +332,10 @@ retry:
 	 * Ok, we have a good vm_area for this memory access, so
 	 * we can handle it.
 	 */
-good_area:
 	code = SEGV_ACCERR;
 
 	if (unlikely(access_error(cause, vma))) {
+		tsk->thread.bad_cause = cause;
 		bad_area(regs, mm, code, addr);
 		return;
 	}
@@ -284,7 +355,11 @@ good_area:
 	if (fault_signal_pending(fault, regs))
 		return;
 
-	if (unlikely((fault & VM_FAULT_RETRY) && (flags & FAULT_FLAG_ALLOW_RETRY))) {
+	/* The fault is fully completed (including releasing mmap lock) */
+	if (fault & VM_FAULT_COMPLETED)
+		return;
+
+	if (unlikely(fault & VM_FAULT_RETRY)) {
 		flags |= FAULT_FLAG_TRIED;
 
 		/*
@@ -297,9 +372,12 @@ good_area:
 
 	mmap_read_unlock(mm);
 
+done:
 	if (unlikely(fault & VM_FAULT_ERROR)) {
+		tsk->thread.bad_cause = cause;
 		mm_fault_error(regs, addr, fault);
 		return;
 	}
 	return;
 }
+NOKPROBE_SYMBOL(do_page_fault);

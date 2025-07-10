@@ -9,17 +9,13 @@
 #include <trace/hooks/vendor_hooks.h>
 
 struct packet_type;
-struct sk_buff;
 struct list_head;
-struct nf_conn;
-struct sock;
-
 DECLARE_HOOK(android_vh_ptype_head,
 	TP_PROTO(const struct packet_type *pt, struct list_head *vendor_pt),
 	TP_ARGS(pt, vendor_pt));
-DECLARE_HOOK(android_vh_kfree_skb,
-	TP_PROTO(struct sk_buff *skb), TP_ARGS(skb));
 
+struct nf_conn;
+struct sock;
 DECLARE_RESTRICTED_HOOK(android_rvh_nf_conn_alloc,
 	TP_PROTO(struct nf_conn *nf_conn), TP_ARGS(nf_conn), 1);
 DECLARE_RESTRICTED_HOOK(android_rvh_nf_conn_free,
@@ -28,6 +24,13 @@ DECLARE_RESTRICTED_HOOK(android_rvh_sk_alloc,
 	TP_PROTO(struct sock *sock), TP_ARGS(sock), 1);
 DECLARE_RESTRICTED_HOOK(android_rvh_sk_free,
 	TP_PROTO(struct sock *sock), TP_ARGS(sock), 1);
+
+struct poll_table_struct;
+typedef struct poll_table_struct poll_table;
+DECLARE_HOOK(android_vh_netlink_poll,
+	TP_PROTO(struct file *file, struct socket *sock, poll_table *wait,
+		__poll_t *mask),
+	TP_ARGS(file, sock, wait, mask));
 
 /* macro versions of hooks are no longer required */
 

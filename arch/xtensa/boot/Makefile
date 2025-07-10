@@ -11,10 +11,6 @@
 # KBUILD_CFLAGS used when building rest of boot (takes effect recursively)
 KBUILD_CFLAGS	+= -fno-builtin
 
-BIG_ENDIAN	:= $(shell echo __XTENSA_EB__ | $(CC) -E - | grep -v "\#")
-
-export BIG_ENDIAN
-
 subdir-y	:= lib
 targets		+= vmlinux.bin vmlinux.bin.gz
 targets		+= uImage xipImage

@@ -49,10 +49,8 @@ static struct addr_marker address_markers[] = {
 	{ FIXADDR_TOP,			"Fixmap end" },
 	{ PCI_IO_START,			"PCI I/O start" },
 	{ PCI_IO_END,			"PCI I/O end" },
-#ifdef CONFIG_SPARSEMEM_VMEMMAP
 	{ VMEMMAP_START,		"vmemmap start" },
 	{ VMEMMAP_START + VMEMMAP_SIZE,	"vmemmap end" },
-#endif
 	{ -1,				NULL },
 };
 
@@ -157,10 +155,6 @@ static const struct prot_bits pte_bits[] = {
 		.mask	= PTE_ATTRINDX_MASK,
 		.val	= PTE_ATTRINDX(MT_DEVICE_nGnRE),
 		.set	= "DEVICE/nGnRE",
-	}, {
-		.mask	= PTE_ATTRINDX_MASK,
-		.val	= PTE_ATTRINDX(MT_DEVICE_GRE),
-		.set	= "DEVICE/GRE",
 	}, {
 		.mask	= PTE_ATTRINDX_MASK,
 		.val	= PTE_ATTRINDX(MT_NORMAL_NC),
@@ -322,6 +316,7 @@ void ptdump_walk(struct seq_file *s, struct ptdump_info *info)
 	st = (struct pg_state){
 		.seq = s,
 		.marker = info->markers,
+		.level = -1,
 		.ptdump = {
 			.note_page = note_page,
 			.range = (struct ptdump_range[]){
@@ -334,7 +329,7 @@ void ptdump_walk(struct seq_file *s, struct ptdump_info *info)
 	ptdump_walk_pgd(&st.ptdump, info->mm, NULL);
 }
 
-static void ptdump_initialize(void)
+static void __init ptdump_initialize(void)
 {
 	unsigned i, j;
 
@@ -378,7 +373,7 @@ void ptdump_check_wx(void)
 		pr_info("Checked W+X mappings: passed, no W+X pages found\n");
 }
 
-static int ptdump_init(void)
+static int __init ptdump_init(void)
 {
 	address_markers[PAGE_END_NR].start_address = PAGE_END;
 #if defined(CONFIG_KASAN_GENERIC) || defined(CONFIG_KASAN_SW_TAGS)

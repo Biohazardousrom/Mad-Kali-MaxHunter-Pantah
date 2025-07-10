@@ -193,6 +193,7 @@ static const int rt9455_voreg_values[] = {
 	4450000, 4450000, 4450000, 4450000, 4450000, 4450000, 4450000, 4450000
 };
 
+#if IS_ENABLED(CONFIG_USB_PHY)
 /*
  * When the charger is in boost mode, REG02[7:2] represent boost output
  * voltage.
@@ -208,6 +209,7 @@ static const int rt9455_boost_voltage_values[] = {
 	5600000, 5600000, 5600000, 5600000, 5600000, 5600000, 5600000, 5600000,
 	5600000, 5600000, 5600000, 5600000, 5600000, 5600000, 5600000, 5600000,
 };
+#endif
 
 /* REG07[3:0] (VMREG) in uV */
 static const int rt9455_vmreg_values[] = {
@@ -1698,7 +1700,7 @@ put_usb_notifier:
 	return ret;
 }
 
-static int rt9455_remove(struct i2c_client *client)
+static void rt9455_remove(struct i2c_client *client)
 {
 	int ret;
 	struct rt9455_info *info = i2c_get_clientdata(client);
@@ -1715,8 +1717,6 @@ static int rt9455_remove(struct i2c_client *client)
 	cancel_delayed_work_sync(&info->pwr_rdy_work);
 	cancel_delayed_work_sync(&info->max_charging_time_work);
 	cancel_delayed_work_sync(&info->batt_presence_work);
-
-	return ret;
 }
 
 static const struct i2c_device_id rt9455_i2c_id_table[] = {

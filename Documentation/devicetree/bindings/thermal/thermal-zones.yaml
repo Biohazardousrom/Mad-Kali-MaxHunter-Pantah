@@ -215,6 +215,7 @@ patternProperties:
       - polling-delay-passive
       - thermal-sensors
       - trips
+
     additionalProperties: false
 
 additionalProperties: false

@@ -26,7 +26,7 @@
 #define MAXCLRKEYSIZE	32	   /* a clear key value may be up to 32 bytes */
 #define MAXAESCIPHERKEYSIZE 136  /* our aes cipher keys have always 136 bytes */
 #define MINEP11AESKEYBLOBSIZE 256  /* min EP11 AES key blob size  */
-#define MAXEP11AESKEYBLOBSIZE 320  /* max EP11 AES key blob size */
+#define MAXEP11AESKEYBLOBSIZE 336  /* max EP11 AES key blob size */
 
 /* Minimum size of a key blob */
 #define MINKEYBLOBSIZE	SECKEYBLOBSIZE
@@ -171,7 +171,7 @@ struct pkey_skey2pkey {
 #define PKEY_SKEY2PKEY _IOWR(PKEY_IOCTL_MAGIC, 0x06, struct pkey_skey2pkey)
 
 /*
- * Verify the given CCA AES secure key for being able to be useable with
+ * Verify the given CCA AES secure key for being able to be usable with
  * the pkey module. Check for correct key type and check for having at
  * least one crypto card being able to handle this key (master key
  * or old master key verification pattern matches).

@@ -22,7 +22,6 @@
 
 #include "power.h"
 
-
 #ifndef CONFIG_SUSPEND
 suspend_state_t pm_suspend_target_state;
 #define pm_suspend_target_state	(PM_SUSPEND_ON)
@@ -31,17 +30,6 @@ suspend_state_t pm_suspend_target_state;
 #define list_for_each_entry_rcu_locked(pos, head, member) \
 	list_for_each_entry_rcu(pos, head, member, \
 		srcu_read_lock_held(&wakeup_srcu))
-
-#ifdef CONFIG_BOEFFLA_WL_BLOCKER
-#include "boeffla_wl_blocker.h"
-
-char list_wl_search[LENGTH_LIST_WL_SEARCH] = {0};
-bool wl_blocker_active = false;
-bool wl_blocker_debug = false;
-
-static void wakeup_source_deactivate(struct wakeup_source *ws);
-#endif
-
 /*
  * If set, the suspend/hibernate code will abort transitions to a sleep state
  * if wakeup events are registered during or immediately before the transition.
@@ -416,9 +404,9 @@ void device_wakeup_detach_irq(struct device *dev)
 }
 
 /**
- * device_wakeup_arm_wake_irqs(void)
+ * device_wakeup_arm_wake_irqs -
  *
- * Itereates over the list of device wakeirqs to arm them.
+ * Iterates over the list of device wakeirqs to arm them.
  */
 void device_wakeup_arm_wake_irqs(void)
 {
@@ -432,9 +420,9 @@ void device_wakeup_arm_wake_irqs(void)
 }
 
 /**
- * device_wakeup_disarm_wake_irqs(void)
+ * device_wakeup_disarm_wake_irqs -
  *
- * Itereates over the list of device wakeirqs to disarm them.
+ * Iterates over the list of device wakeirqs to disarm them.
  */
 void device_wakeup_disarm_wake_irqs(void)
 {
@@ -516,38 +504,9 @@ void device_set_wakeup_capable(struct device *dev, bool capable)
 EXPORT_SYMBOL_GPL(device_set_wakeup_capable);
 
 /**
- * device_init_wakeup - Device wakeup initialization.
- * @dev: Device to handle.
- * @enable: Whether or not to enable @dev as a wakeup device.
- *
- * By default, most devices should leave wakeup disabled.  The exceptions are
- * devices that everyone expects to be wakeup sources: keyboards, power buttons,
- * possibly network interfaces, etc.  Also, devices that don't generate their
- * own wakeup requests but merely forward requests from one bus to another
- * (like PCI bridges) should have wakeup enabled by default.
- */
-int device_init_wakeup(struct device *dev, bool enable)
-{
-	int ret = 0;
-
-	if (!dev)
-		return -EINVAL;
-
-	if (enable) {
-		device_set_wakeup_capable(dev, true);
-		ret = device_wakeup_enable(dev);
-	} else {
-		device_wakeup_disable(dev);
-		device_set_wakeup_capable(dev, false);
-	}
-
-	return ret;
-}
-EXPORT_SYMBOL_GPL(device_init_wakeup);
-
-/**
  * device_set_wakeup_enable - Enable or disable a device to wake up the system.
  * @dev: Device to handle.
+ * @enable: enable/disable flag
  */
 int device_set_wakeup_enable(struct device *dev, bool enable)
 {
@@ -597,11 +556,11 @@ static bool wakeup_source_not_registered(struct wakeup_source *ws)
  */
 
 /**
- * wakup_source_activate - Mark given wakeup source as active.
+ * wakeup_source_activate - Mark given wakeup source as active.
  * @ws: Wakeup source to handle.
  *
  * Update the @ws' statistics and, if @ws has just been activated, notify the PM
- * core of the event by incrementing the counter of of wakeup events being
+ * core of the event by incrementing the counter of the wakeup events being
  * processed.
  */
 static void wakeup_source_activate(struct wakeup_source *ws)
@@ -624,57 +583,6 @@ static void wakeup_source_activate(struct wakeup_source *ws)
 	trace_wakeup_source_activate(ws->name, cec);
 }
 
-#ifdef CONFIG_BOEFFLA_WL_BLOCKER
-// AP: Function to check if a wakelock is on the wakelock blocker list
-static bool check_for_block(struct wakeup_source *ws)
-{
-	char wakelock_name[52] = {0};
-	int length;
-
-	// if debug mode on, print every wakelock requested
-	if (wl_blocker_debug)
-		printk("Boeffla WL blocker: %s requested\n", ws->name);
-
-	// if there is no list of wakelocks to be blocked, exit without futher checking
-	if (!wl_blocker_active)
-		return false;
-
-	// only if ws structure is valid
-	if (ws)
-	{
-		// wake lock names handled have maximum length=50 and minimum=1
-		length = strlen(ws->name);
-		if ((length > 50) || (length < 1))
-			return false;
-
-		// check if wakelock is in wake lock list to be blocked
-		sprintf(wakelock_name, ";%s;", ws->name);
-
-		if(strstr(list_wl_search, wakelock_name) == NULL)
-			return false;
-
-		// wake lock is in list, print it if debug mode on
-		if (wl_blocker_debug)
-			printk("Boeffla WL blocker: %s blocked\n", ws->name);
-
-		// if it is currently active, deactivate it immediately + log in debug mode
-		if (ws->active)
-		{
-			wakeup_source_deactivate(ws);
-
-			if (wl_blocker_debug)
-				printk("Boeffla WL blocker: %s killed\n", ws->name);
-		}
-
-		// finally block it
-		return true;
-	}
-
-	// there was no valid ws structure, do not block by default
-	return false;
-}
-#endif
-
 /**
  * wakeup_source_report_event - Report wakeup event using the given source.
  * @ws: Wakeup source to report the event for.
@@ -682,20 +590,16 @@ static bool check_for_block(struct wakeup_source *ws)
  */
 static void wakeup_source_report_event(struct wakeup_source *ws, bool hard)
 {
-#ifdef CONFIG_BOEFFLA_WL_BLOCKER
-	if (!check_for_block(ws))	// AP: check if wakelock is on wakelock blocker list
-	{
-#endif
-		ws->event_count++;
-		/* This is racy, but the counter is approximate anyway. */
-		if (events_check_enabled)
-			ws->wakeup_count++;
+	ws->event_count++;
+	/* This is racy, but the counter is approximate anyway. */
+	if (events_check_enabled)
+		ws->wakeup_count++;
 
-		if (!ws->active)
-			wakeup_source_activate(ws);
-#ifdef CONFIG_BOEFFLA_WL_BLOCKER
-	}
-#endif
+	if (!ws->active)
+		wakeup_source_activate(ws);
+
+	if (hard)
+		pm_system_wakeup();
 }
 
 /**
@@ -720,7 +624,6 @@ void __pm_stay_awake(struct wakeup_source *ws)
 	spin_unlock_irqrestore(&ws->lock, flags);
 }
 EXPORT_SYMBOL_GPL(__pm_stay_awake);
-
 
 /**
  * pm_stay_awake - Notify the PM core that a wakeup event is being processed.
@@ -758,7 +661,7 @@ static inline void update_prevent_sleep_time(struct wakeup_source *ws,
 #endif
 
 /**
- * wakup_source_deactivate - Mark given wakeup source as inactive.
+ * wakeup_source_deactivate - Mark given wakeup source as inactive.
  * @ws: Wakeup source to handle.
  *
  * Update the @ws' statistics and notify the PM core that the wakeup source has
@@ -803,7 +706,7 @@ static void wakeup_source_deactivate(struct wakeup_source *ws)
 
 	/*
 	 * Increment the counter of registered wakeup events and decrement the
-	 * couter of wakeup events in progress simultaneously.
+	 * counter of wakeup events in progress simultaneously.
 	 */
 	cec = atomic_add_return(MAX_IN_PROGRESS, &combined_event_count);
 	trace_wakeup_source_deactivate(ws->name, cec);
@@ -857,7 +760,7 @@ EXPORT_SYMBOL_GPL(pm_relax);
 
 /**
  * pm_wakeup_timer_fn - Delayed finalization of a wakeup event.
- * @data: Address of the wakeup source object associated with the event source.
+ * @t: timer list
  *
  * Call wakeup_source_deactivate() for the wakeup source whose address is stored
  * in @data if it is currently active and its timer has not been canceled and
@@ -985,11 +888,7 @@ void pm_print_active_wakeup_sources(void)
 	list_for_each_entry_rcu_locked(ws, &wakeup_sources, entry) {
 		if (ws->active) {
 			pm_pr_dbg("active wakeup source: %s\n", ws->name);
-			pr_info("active wakeup source: %s\n", ws->name);
-#ifdef CONFIG_BOEFFLA_WL_BLOCKER
-			if (!check_for_block(ws))	// AP: check if wakelock is on wakelock blocker list
-#endif
-				active = 1;
+			active = 1;
 		} else if (!active &&
 			   (!last_activity_ws ||
 			    ktime_to_ns(ws->last_time) >
@@ -1040,6 +939,7 @@ bool pm_wakeup_pending(void)
 
 	return ret || atomic_read(&pm_abort_suspend) > 0;
 }
+EXPORT_SYMBOL_GPL(pm_wakeup_pending);
 
 void pm_system_wakeup(void)
 {
@@ -1083,6 +983,8 @@ void pm_system_irq_wakeup(unsigned int irq_number)
 	else
 		irq_number = 0;
 
+	pm_pr_dbg("Triggering wakeup from IRQ %d\n", irq_number);
+
 	raw_spin_unlock_irqrestore(&wakeup_irq_lock, flags);
 
 	if (irq_number) {
@@ -1097,6 +999,7 @@ void pm_system_irq_wakeup(unsigned int irq_number)
 
 		log_irq_wakeup_reason(irq_number);
 		pr_warn("%s: %d triggered %s\n", __func__, irq_number, name);
+
 		pm_system_wakeup();
 	}
 }
@@ -1171,7 +1074,7 @@ bool pm_save_wakeup_count(unsigned int count)
 #ifdef CONFIG_PM_AUTOSLEEP
 /**
  * pm_wakep_autosleep_enabled - Modify autosleep_enabled for all wakeup sources.
- * @enabled: Whether to set or to clear the autosleep_enabled flags.
+ * @set: Whether to set or to clear the autosleep_enabled flags.
  */
 void pm_wakep_autosleep_enabled(bool set)
 {
@@ -1329,7 +1232,7 @@ static const struct file_operations wakeup_sources_stats_fops = {
 
 static int __init wakeup_sources_debugfs_init(void)
 {
-	debugfs_create_file("wakeup_sources", S_IRUGO, NULL, NULL,
+	debugfs_create_file("wakeup_sources", 0444, NULL, NULL,
 			    &wakeup_sources_stats_fops);
 	return 0;
 }

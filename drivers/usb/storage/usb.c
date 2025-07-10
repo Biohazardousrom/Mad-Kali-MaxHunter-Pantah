@@ -388,7 +388,7 @@ static int usb_stor_control_thread(void * __us)
 		if (srb->result == DID_ABORT << 16) {
 SkipForAbort:
 			usb_stor_dbg(us, "scsi command aborted\n");
-			srb = NULL;	/* Don't call srb->scsi_done() */
+			srb = NULL;	/* Don't call scsi_done() */
 		}
 
 		/*
@@ -417,7 +417,7 @@ SkipForAbort:
 		if (srb) {
 			usb_stor_dbg(us, "scsi cmd done, result=0x%x\n",
 					srb->result);
-			srb->scsi_done(srb);
+			scsi_done_direct(srb);
 		}
 	} /* for (;;) */
 
@@ -1065,7 +1065,7 @@ int usb_stor_probe2(struct us_data *us)
 
 	if (delay_use > 0)
 		dev_dbg(dev, "waiting for device to settle before scanning\n");
-	queue_delayed_work(system_freezable_power_efficient_wq, &us->scan_dwork,
+	queue_delayed_work(system_freezable_wq, &us->scan_dwork,
 			delay_use * HZ);
 	return 0;
 

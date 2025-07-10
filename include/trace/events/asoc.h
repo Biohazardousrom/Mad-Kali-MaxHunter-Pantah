@@ -7,9 +7,12 @@
 
 #include <linux/ktime.h>
 #include <linux/tracepoint.h>
+#include <sound/jack.h>
 
 #define DAPM_DIRECT "(direct)"
 #define DAPM_ARROW(dir) (((dir) == SND_SOC_DAPM_DIR_OUT) ? "->" : "<-")
+
+TRACE_DEFINE_ENUM(SND_SOC_DAPM_DIR_OUT);
 
 struct snd_soc_jack;
 struct snd_soc_card;

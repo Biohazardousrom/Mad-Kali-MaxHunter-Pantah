@@ -370,9 +370,8 @@ static void __rp2_uart_set_termios(struct rp2_uart_port *up,
 	       up->ucode + RP2_RX_SWFLOW);
 }
 
-static void rp2_uart_set_termios(struct uart_port *port,
-				 struct ktermios *new,
-				 struct ktermios *old)
+static void rp2_uart_set_termios(struct uart_port *port, struct ktermios *new,
+				 const struct ktermios *old)
 {
 	struct rp2_uart_port *up = port_to_up(port);
 	unsigned long flags;
@@ -423,9 +422,7 @@ static void rp2_rx_chars(struct rp2_uart_port *up)
 		up->port.icount.rx++;
 	}
 
-	spin_unlock(&up->port.lock);
 	tty_flip_buffer_push(port);
-	spin_lock(&up->port.lock);
 }
 
 static void rp2_tx_chars(struct rp2_uart_port *up)

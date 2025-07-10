@@ -141,11 +141,11 @@ static int basic_test(const char *mount_dir)
 	int fuse_dev = -1;
 	char *filename = NULL;
 	int fd = -1;
-	int pid = -1;
-	int status;
+	FUSE_DECLARE_DAEMON;
 
 	TESTEQUAL(mount_fuse(mount_dir, -1, -1, &fuse_dev), 0);
-	FUSE_ACTION
+	FUSE_START_DAEMON();
+	if (action) {
 		char data[256];
 
 		filename = concat_file_name(mount_dir, test_name);
@@ -154,7 +154,7 @@ static int basic_test(const char *mount_dir)
 		TESTCOND(!strcmp(data, test_data));
 		TESTSYSCALL(close(fd));
 		fd = -1;
-	FUSE_DAEMON
+	} else {
 		DECL_FUSE_IN(open);
 		DECL_FUSE_IN(read);
 		DECL_FUSE_IN(flush);
@@ -187,12 +187,9 @@ static int basic_test(const char *mount_dir)
 
 		TESTFUSEIN(FUSE_RELEASE, release_in);
 		TESTFUSEOUTEMPTY();
-	FUSE_DONE
-
-	result = TEST_SUCCESS;
-out:
-	if (!pid)
-		exit(TEST_FAILURE);
+		exit(TEST_SUCCESS);
+	}
+	FUSE_END_DAEMON();
 	close(fuse_dev);
 	close(fd);
 	free(filename);
@@ -253,8 +250,7 @@ static int bpf_test_partial(const char *mount_dir)
 	int fuse_dev = -1;
 	char *filename = NULL;
 	int fd = -1;
-	int pid = -1;
-	int status;
+	FUSE_DECLARE_DAEMON;
 
 	TEST(src_fd = open(ft_src, O_DIRECTORY | O_RDONLY | O_CLOEXEC),
 	     src_fd != -1);
@@ -263,7 +259,8 @@ static int bpf_test_partial(const char *mount_dir)
 				  &bpf_fd, NULL, NULL), 0);
 	TESTEQUAL(mount_fuse(mount_dir, bpf_fd, src_fd, &fuse_dev), 0);
 
-	FUSE_ACTION
+	FUSE_START_DAEMON();
+	if (action) {
 		uint8_t data[PAGE_SIZE];
 
 		TEST(filename = concat_file_name(mount_dir, test_name),
@@ -278,7 +275,7 @@ static int bpf_test_partial(const char *mount_dir)
 		TESTCOND(!test_buffer(data, PAGE_SIZE, 2, 1));
 		TESTSYSCALL(close(fd));
 		fd = -1;
-	FUSE_DAEMON
+	} else {
 		DECL_FUSE(open);
 		DECL_FUSE(read);
 		DECL_FUSE(release);
@@ -296,12 +293,9 @@ static int bpf_test_partial(const char *mount_dir)
 
 		TESTFUSEIN(FUSE_RELEASE, release_in);
 		TESTFUSEOUTEMPTY();
-	FUSE_DONE
-
-	result = TEST_SUCCESS;
-out:
-	if (!pid)
-		exit(TEST_FAILURE);
+		exit(TEST_SUCCESS);
+	}
+	FUSE_END_DAEMON();
 	close(fuse_dev);
 	close(fd);
 	free(filename);
@@ -353,15 +347,17 @@ out:
 
 static int bpf_test_readdir(const char *mount_dir)
 {
-	const char *names[] = {"real", "partial", "fake", ".", ".."};
+	static const char * const names[] = {
+		"real", "partial", "fake", ".", ".."
+	};
+	bool used[ARRAY_SIZE(names)] = { false };
 	int result = TEST_FAILURE;
 	int bpf_fd = -1;
 	int src_fd = -1;
 	int fuse_dev = -1;
-	int pid = -1;
-	int status;
 	DIR *dir = NULL;
 	struct dirent *dirent;
+	FUSE_DECLARE_DAEMON;
 
 	TEST(src_fd = open(ft_src, O_DIRECTORY | O_RDONLY | O_CLOEXEC),
 	     src_fd != -1);
@@ -371,7 +367,8 @@ static int bpf_test_readdir(const char *mount_dir)
 				  &bpf_fd, NULL, NULL), 0);
 	TESTEQUAL(mount_fuse(mount_dir, bpf_fd, src_fd, &fuse_dev), 0);
 
-	FUSE_ACTION
+	FUSE_START_DAEMON();
+	if (action) {
 		int i, j;
 
 		TEST(dir = s_opendir(s(mount_dir)), dir);
@@ -381,9 +378,9 @@ static int bpf_test_readdir(const char *mount_dir)
 			TEST(dirent = readdir(dir), dirent);
 
 			for (j = 0; j < ARRAY_SIZE(names); ++j)
-				if (names[j] &&
+				if (!used[j] &&
 				    strcmp(names[j], dirent->d_name) == 0) {
-					names[j] = NULL;
+					used[j] = true;
 					break;
 				}
 			TESTNE(j, ARRAY_SIZE(names));
@@ -392,7 +389,7 @@ static int bpf_test_readdir(const char *mount_dir)
 		TESTSYSCALL(closedir(dir));
 		dir = NULL;
 		TESTEQUAL(bpf_test_trace("readdir"), 0);
-	FUSE_DAEMON
+	} else {
 		struct fuse_in_header *in_header =
 			(struct fuse_in_header *)bytes_in;
 		ssize_t res = read(fuse_dev, bytes_in, sizeof(bytes_in));
@@ -428,10 +425,9 @@ static int bpf_test_readdir(const char *mount_dir)
 			  sizeof(struct fuse_read_out));
 		TESTEQUAL(in_header->opcode, FUSE_READDIR | FUSE_POSTFILTER);
 		TESTFUSEDIROUTREAD(read_out, bytes_in, 0);
-	FUSE_DONE
-
-	result = TEST_SUCCESS;
-out:
+		exit(TEST_SUCCESS);
+	}
+	FUSE_END_DAEMON();
 	closedir(dir);
 	close(fuse_dev);
 	umount(mount_dir);
@@ -442,18 +438,20 @@ out:
 
 static int bpf_test_redact_readdir(const char *mount_dir)
 {
-	const char *names[] = {"f1", "f2", "f3", "f4", "f5", "f6", ".", ".."};
+	static const char * const names[] = {
+		"f1", "f2", "f3", "f4", "f5", "f6", ".", ".."
+	};
+	bool used[ARRAY_SIZE(names)] = { false };
 	int num_shown = (ARRAY_SIZE(names) - 2) / 2 + 2;
 	int result = TEST_FAILURE;
 	int bpf_fd = -1;
 	int src_fd = -1;
 	int fuse_dev = -1;
-	int pid = -1;
-	int status;
 	DIR *dir = NULL;
 	struct dirent *dirent;
 	int i;
 	int count = 0;
+	FUSE_DECLARE_DAEMON;
 
 	TEST(src_fd = open(ft_src, O_DIRECTORY | O_RDONLY | O_CLOEXEC),
 	     src_fd != -1);
@@ -464,7 +462,8 @@ static int bpf_test_redact_readdir(const char *mount_dir)
 				  &bpf_fd, NULL, NULL), 0);
 	TESTEQUAL(mount_fuse(mount_dir, bpf_fd, src_fd, &fuse_dev), 0);
 
-	FUSE_ACTION
+	FUSE_START_DAEMON();
+	if (action) {
 		int j;
 
 		TEST(dir = s_opendir(s(mount_dir)), dir);
@@ -473,9 +472,9 @@ static int bpf_test_redact_readdir(const char *mount_dir)
 			TESTEQUAL(errno, 0);
 
 			for (j = 0; j < ARRAY_SIZE(names); ++j)
-				if (names[j] &&
+				if (!used[j] &&
 				    strcmp(names[j], dirent->d_name) == 0) {
-					names[j] = NULL;
+					used[j] = true;
 					count++;
 					break;
 				}
@@ -485,8 +484,9 @@ static int bpf_test_redact_readdir(const char *mount_dir)
 		TESTEQUAL(count, num_shown);
 		TESTSYSCALL(closedir(dir));
 		dir = NULL;
-	FUSE_DAEMON
+	} else {
 		bool skip = true;
+
 		for (int i = 0; i < ARRAY_SIZE(names) + 1; i++) {
 			uint8_t bytes_in[FUSE_MIN_READ_BUFFER];
 			uint8_t bytes_out[FUSE_MIN_READ_BUFFER];
@@ -567,10 +567,9 @@ static int bpf_test_redact_readdir(const char *mount_dir)
 				  out_header->len);
 			}
 		}
-	FUSE_DONE
-
-	result = TEST_SUCCESS;
-out:
+		exit(TEST_SUCCESS);
+	}
+	FUSE_END_DAEMON();
 	closedir(dir);
 	close(fuse_dev);
 	umount(mount_dir);
@@ -589,19 +588,19 @@ static int bpf_test_creat(const char *mount_dir)
 	const char *file_name = "file";
 	int result = TEST_FAILURE;
 	int fuse_dev = -1;
-	int pid = -1;
-	int status;
 	int fd = -1;
+	FUSE_DECLARE_DAEMON;
 
 	TESTEQUAL(mount_fuse(mount_dir, -1, -1, &fuse_dev), 0);
 
-	FUSE_ACTION
+	FUSE_START_DAEMON();
+	if (action) {
 		TEST(fd = s_creat(s_path(s_path(s(mount_dir), s(dir_name)),
 					 s(file_name)),
 				  0777),
 		     fd != -1);
 		TESTSYSCALL(close(fd));
-	FUSE_DAEMON
+	} else {
 		DECL_FUSE_IN(create);
 		DECL_FUSE_IN(release);
 		DECL_FUSE_IN(flush);
@@ -641,10 +640,9 @@ static int bpf_test_creat(const char *mount_dir)
 
 		TESTFUSEIN(FUSE_RELEASE, release_in);
 		TESTFUSEOUTEMPTY();
-	FUSE_DONE
-
-	result = TEST_SUCCESS;
-out:
+		exit(TEST_SUCCESS);
+	}
+	FUSE_END_DAEMON();
 	close(fuse_dev);
 	umount(mount_dir);
 	return result;
@@ -811,8 +809,7 @@ static int bpf_test_alter_errcode_userspace(const char *mount_dir)
 	int src_fd = -1;
 	int bpf_fd = -1;
 	int fuse_dev = -1;
-	int pid = -1;
-	int status;
+	FUSE_DECLARE_DAEMON;
 
 	TEST(src_fd = open(ft_src, O_DIRECTORY | O_RDONLY | O_CLOEXEC),
 	     src_fd != -1);
@@ -820,16 +817,17 @@ static int bpf_test_alter_errcode_userspace(const char *mount_dir)
 				  &bpf_fd, NULL, NULL), 0);
 	TESTEQUAL(mount_fuse(mount_dir, bpf_fd, src_fd, &fuse_dev), 0);
 
-	FUSE_ACTION
+	FUSE_START_DAEMON();
+	if (action) {
 		TESTEQUAL(s_unlink(s_path(s(mount_dir), s(dir_name))),
 		     -1);
 		TESTEQUAL(errno, ENOMEM);
-	FUSE_DAEMON
+	} else {
 		TESTFUSELOOKUP("doesnotexist", FUSE_POSTFILTER);
 		TESTFUSEOUTERROR(-ENOMEM);
-	FUSE_DONE
-	result = TEST_SUCCESS;
-out:
+		exit(TEST_SUCCESS);
+	}
+	FUSE_END_DAEMON();
 	close(fuse_dev);
 	umount(mount_dir);
 	close(bpf_fd);
@@ -879,8 +877,7 @@ static int bpf_test_largedir(const char *mount_dir)
 	int fuse_dev = -1;
 	struct map_relocation *map_relocations = NULL;
 	size_t map_count = 0;
-	int pid = -1;
-	int status;
+	FUSE_DECLARE_DAEMON;
 
 	TEST(src_fd = open(ft_src, O_DIRECTORY | O_RDONLY | O_CLOEXEC),
 	     src_fd != -1);
@@ -888,7 +885,8 @@ static int bpf_test_largedir(const char *mount_dir)
 			  &bpf_fd, &map_relocations, &map_count), 0);
 	TESTEQUAL(mount_fuse(mount_dir, bpf_fd, src_fd, &fuse_dev), 0);
 
-	FUSE_ACTION
+	FUSE_START_DAEMON();
+	if (action) {
 		int i;
 		int fd;
 		DIR *dir = NULL;
@@ -908,17 +906,16 @@ static int bpf_test_largedir(const char *mount_dir)
 		for (dirent = readdir(dir); dirent; dirent = readdir(dir))
 			;
 		closedir(dir);
-	FUSE_DAEMON
+	} else {
 		int i;
 
 		for (i = 0; i < files + 2; ++i) {
 			TESTFUSELOOKUP(show, FUSE_PREFILTER);
 			TESTFUSEOUTREAD(show, 5);
 		}
-	FUSE_DONE
-
-	result = TEST_SUCCESS;
-out:
+		exit(TEST_SUCCESS);
+	}
+	FUSE_END_DAEMON();
 	close(fuse_dev);
 	umount(mount_dir);
 	close(bpf_fd);
@@ -1110,11 +1107,11 @@ static int bpf_test_set_backing(const char *mount_dir)
 	int result = TEST_FAILURE;
 	int fuse_dev = -1;
 	int fd = -1;
-	int pid = -1;
-	int status;
+	FUSE_DECLARE_DAEMON;
 
 	TESTEQUAL(mount_fuse_no_init(mount_dir, -1, -1, &fuse_dev), 0);
-	FUSE_ACTION
+	FUSE_START_DAEMON();
+	if (action) {
 		char data[256] = {0};
 
 		TESTERR(fd = s_open(s_path(s(mount_dir), s(test_name)),
@@ -1124,7 +1121,7 @@ static int bpf_test_set_backing(const char *mount_dir)
 		TESTSYSCALL(close(fd));
 		fd = -1;
 		TESTSYSCALL(umount(mount_dir));
-	FUSE_DAEMON
+	} else {
 		int bpf_fd  = -1;
 		int backing_fd = -1;
 
@@ -1147,12 +1144,9 @@ static int bpf_test_set_backing(const char *mount_dir)
 		read(fuse_dev, bytes_in, sizeof(bytes_in));
 		TESTSYSCALL(close(bpf_fd));
 		TESTSYSCALL(close(backing_fd));
-	FUSE_DONE
-
-	result = TEST_SUCCESS;
-out:
-	if (!pid)
-		exit(TEST_FAILURE);
+		exit(TEST_SUCCESS);
+	}
+	FUSE_END_DAEMON();
 	close(fuse_dev);
 	close(fd);
 	umount(mount_dir);
@@ -1172,19 +1166,18 @@ static int bpf_test_remove_backing(const char *mount_dir)
 	int fd = -1;
 	int src_fd = -1;
 	int bpf_fd = -1;
-	int pid = -1;
-	int status;
 	char data[256] = {0};
+	FUSE_DECLARE_DAEMON;
 
 	/*
 	 * Create folder1/file
 	 *        folder2/file
 	 *
-	 * test will install bpf into mount
-	 * bpf will postfilter root lookup to daemon
-	 * daemon will remove bpf and redirect opens on folder1 to folder2
-	 * test will open folder1/file which will be redirected to folder2
-	 * test will check no traces for file, and contents are folder2/file
+	 * test will install bpf into mount.
+	 * bpf will postfilter root lookup to daemon.
+	 * daemon will remove bpf and redirect opens on folder1 to folder2.
+	 * test will open folder1/file which will be redirected to folder2.
+	 * test will check no traces for file, and contents are folder2/file.
 	 */
 	TESTEQUAL(bpf_clear_trace(), 0);
 	TESTSYSCALL(s_mkdir(s_path(s(ft_src), s(folder1)), 0777));
@@ -1204,7 +1197,8 @@ static int bpf_test_remove_backing(const char *mount_dir)
 				  NULL, NULL), 0);
 	TESTEQUAL(mount_fuse_no_init(mount_dir, bpf_fd, src_fd, &fuse_dev), 0);
 
-	FUSE_ACTION
+	FUSE_START_DAEMON();
+	if (action) {
 		TESTERR(fd = s_open(s_pathn(3, s(mount_dir), s(folder1),
 					    s(file)),
 				    O_RDONLY | O_CLOEXEC), fd != -1);
@@ -1214,12 +1208,12 @@ static int bpf_test_remove_backing(const char *mount_dir)
 		TESTSYSCALL(close(fd));
 		fd = -1;
 		TESTSYSCALL(umount(mount_dir));
-	FUSE_DAEMON
+	} else {
 		struct {
 			char name[8];
 			struct fuse_entry_out feo;
 			struct fuse_entry_bpf_out febo;
-		} __attribute__((packed)) in;
+		} __packed in;
 		int backing_fd = -1;
 
 		TESTFUSEINIT();
@@ -1237,10 +1231,9 @@ static int bpf_test_remove_backing(const char *mount_dir)
 		while (read(fuse_dev, bytes_in, sizeof(bytes_in)) != -1)
 			;
 		TESTSYSCALL(close(backing_fd));
-	FUSE_DONE
-
-	result = TEST_SUCCESS;
-out:
+		exit(TEST_SUCCESS);
+	}
+	FUSE_END_DAEMON();
 	close(fuse_dev);
 	close(fd);
 	close(src_fd);
@@ -1580,8 +1573,7 @@ static int bpf_test_readdirplus_not_overriding_backing(const char *mount_dir)
 	int fuse_dev = -1;
 	int src_fd = -1;
 	int content_fd = -1;
-	int pid = -1;
-	int status;
+	FUSE_DECLARE_DAEMON;
 
 	TESTSYSCALL(s_mkdir(s_path(s(ft_src), s(folder1)), 0777));
 	TEST(content_fd = s_creat(s_pathn(3, s(ft_src), s(folder1), s(content_file)), 0777),
@@ -1589,12 +1581,12 @@ static int bpf_test_readdirplus_not_overriding_backing(const char *mount_dir)
 	TESTEQUAL(write(content_fd, content, strlen(content)), strlen(content));
 	TESTEQUAL(mount_fuse_no_init(mount_dir, -1, -1, &fuse_dev), 0);
 
-	FUSE_ACTION
+	FUSE_START_DAEMON();
+	if (action) {
 		DIR *open_mount_dir = NULL;
 		struct dirent *mount_dirent;
 		int dst_folder1_fd = -1;
 		int dst_content_fd = -1;
-		int dst_content_read_size = -1;
 		char content_buffer[12];
 
 		// Step 1: Lookup folder1
@@ -1606,10 +1598,9 @@ static int bpf_test_readdirplus_not_overriding_backing(const char *mount_dir)
 			s_open(s_pathn(3, s(mount_dir), s(folder1), s(content_file)),
 			O_RDONLY | O_CLOEXEC), dst_content_fd != -1);
 
-		TEST(dst_content_read_size =
-			read(dst_content_fd, content_buffer, strlen(content)),
-			dst_content_read_size == strlen(content) &&
-			strcmp(content, content_buffer) == 0);
+		TESTEQUAL(read(dst_content_fd, content_buffer, strlen(content)),
+			  strlen(content));
+		TESTEQUAL(strncmp(content, content_buffer, strlen(content)), 0);
 
 		TESTSYSCALL(close(dst_content_fd));
 		dst_content_fd = -1;
@@ -1629,14 +1620,13 @@ static int bpf_test_readdirplus_not_overriding_backing(const char *mount_dir)
 			s_open(s_pathn(3, s(mount_dir), s(folder1), s(content_file)),
 			O_RDONLY | O_CLOEXEC), dst_content_fd != -1);
 
-		TEST(dst_content_read_size =
-			read(dst_content_fd, content_buffer, strlen(content)),
-			dst_content_read_size == strlen(content) &&
-			strcmp(content, content_buffer) == 0);
+		TESTEQUAL(read(dst_content_fd, content_buffer, strlen(content)),
+			  strlen(content));
+		TESTEQUAL(strncmp(content, content_buffer, strlen(content)), 0);
 
 		TESTSYSCALL(close(dst_content_fd));
 		dst_content_fd = -1;
-	FUSE_DAEMON
+	} else {
 		size_t read_size = 0;
 		struct fuse_in_header *in_header = (struct fuse_in_header *)bytes_in;
 		struct fuse_read_out *read_out = NULL;
@@ -1729,11 +1719,9 @@ static int bpf_test_readdirplus_not_overriding_backing(const char *mount_dir)
 				read_size - sizeof(struct fuse_in_header) -
 					sizeof(struct fuse_read_in) -
 					sizeof(struct fuse_read_out));
-	FUSE_DONE
-
-	result = TEST_SUCCESS;
-
-out:
+		exit(TEST_SUCCESS);
+	}
+	FUSE_END_DAEMON();
 	close(fuse_dev);
 	close(content_fd);
 	close(src_fd);
@@ -1750,15 +1738,15 @@ static int bpf_test_no_readdirplus_without_nodeid(const char *mount_dir)
 	int src_fd = -1;
 	int content_fd = -1;
 	int bpf_fd = -1;
-	int pid = -1;
-	int status;
+	FUSE_DECLARE_DAEMON;
 
 	TESTEQUAL(install_elf_bpf("test_bpf.bpf", "test_readdirplus",
 					  &bpf_fd, NULL, NULL), 0);
 	TESTSYSCALL(s_mkdir(s_path(s(ft_src), s(folder1)), 0777));
 	TESTSYSCALL(s_mkdir(s_path(s(ft_src), s(folder2)), 0777));
 	TESTEQUAL(mount_fuse_no_init(mount_dir, -1, -1, &fuse_dev), 0);
-	FUSE_ACTION
+	FUSE_START_DAEMON();
+	if (action) {
 		DIR *open_dir = NULL;
 		struct dirent *dirent;
 
@@ -1777,7 +1765,7 @@ static int bpf_test_no_readdirplus_without_nodeid(const char *mount_dir)
 		TESTCOND(errno == EINVAL);
 		TESTSYSCALL(closedir(open_dir));
 		open_dir = NULL;
-	FUSE_DAEMON
+	} else {
 		size_t read_size;
 		struct fuse_in_header *in_header = (struct fuse_in_header *)bytes_in;
 		struct fuse_attr attr = {};
@@ -1832,9 +1820,9 @@ static int bpf_test_no_readdirplus_without_nodeid(const char *mount_dir)
 		TEST(read_size = read(fuse_dev, bytes_in, sizeof(bytes_in)), read_size > 0);
 		TESTEQUAL(in_header->opcode, FUSE_READDIRPLUS);
 		TESTFUSEOUTERROR(-EINVAL);
-	FUSE_DONE
-	result = TEST_SUCCESS;
-out:
+		exit(TEST_SUCCESS);
+	}
+	FUSE_END_DAEMON();
 	close(fuse_dev);
 	close(content_fd);
 	close(src_fd);
@@ -1867,8 +1855,8 @@ static int bpf_test_revalidate_handle_backing_fd(const char *mount_dir)
 	int fuse_dev = -1;
 	int src_fd = -1;
 	int content_fd = -1;
-	int pid = -1;
-	int status;
+	FUSE_DECLARE_DAEMON;
+
 	TESTSYSCALL(s_mkdir(s_path(s(ft_src), s(folder1)), 0777));
 	TEST(content_fd = s_creat(s_pathn(3, s(ft_src), s(folder1), s(content_file)), 0777),
 		content_fd != -1);
@@ -1876,10 +1864,10 @@ static int bpf_test_revalidate_handle_backing_fd(const char *mount_dir)
 	TESTSYSCALL(close(content_fd));
 	content_fd = -1;
 	TESTEQUAL(mount_fuse_no_init(mount_dir, -1, -1, &fuse_dev), 0);
-	FUSE_ACTION
+	FUSE_START_DAEMON();
+	if (action) {
 		int dst_folder1_fd = -1;
 		int dst_content_fd = -1;
-		int dst_content_read_size = -1;
 		char content_buffer[9] = {0};
 		// Step 1: Lookup folder1
 		TESTERR(dst_folder1_fd = s_open(s_path(s(mount_dir), s(folder1)),
@@ -1895,15 +1883,15 @@ static int bpf_test_revalidate_handle_backing_fd(const char *mount_dir)
 		TESTERR(dst_content_fd =
 			s_open(s_pathn(3, s(mount_dir), s(folder1), s(content_file)),
 			O_RDONLY | O_CLOEXEC), dst_content_fd != -1);
-		TEST(dst_content_read_size =
-			read(dst_content_fd, content_buffer, strlen(content)),
-			dst_content_read_size == strlen(content) &&
-			strcmp(content, content_buffer) == 0);
+		TESTEQUAL(read(dst_content_fd, content_buffer, strlen(content)),
+			  strlen(content));
+		TESTEQUAL(strncmp(content, content_buffer, strlen(content)), 0);
 		TESTSYSCALL(close(dst_content_fd));
 		dst_content_fd = -1;
-	FUSE_DAEMON
+	} else {
 		struct fuse_attr attr = {};
 		int backing_fd = -1;
+
 		TESTFUSEINITFLAGS(FUSE_DO_READDIRPLUS | FUSE_READDIRPLUS_AUTO);
 		// Step 1: Lookup folder1 set entry_timeout to 0 to trigger
 		// revalidate later
@@ -1965,9 +1953,9 @@ static int bpf_test_revalidate_handle_backing_fd(const char *mount_dir)
 				.backing_fd = backing_fd,
 			     }));
 		TESTSYSCALL(close(backing_fd));
-	FUSE_DONE
-	result = TEST_SUCCESS;
-out:
+		exit(TEST_SUCCESS);
+	}
+	FUSE_END_DAEMON();
 	close(fuse_dev);
 	close(content_fd);
 	close(src_fd);
@@ -1985,8 +1973,7 @@ static int bpf_test_lookup_postfilter(const char *mount_dir)
 	int src_fd = -1;
 	int fuse_dev = -1;
 	int file_fd = -1;
-	int pid = -1;
-	int status;
+	FUSE_DECLARE_DAEMON;
 
 	TEST(file_fd = s_creat(s_path(s(ft_src), s(file1_name)), 0777),
 	     file_fd != -1);
@@ -2000,7 +1987,8 @@ static int bpf_test_lookup_postfilter(const char *mount_dir)
 	TEST(src_fd = open(ft_src, O_DIRECTORY | O_RDONLY | O_CLOEXEC),
 	     src_fd != -1);
 	TESTEQUAL(mount_fuse(mount_dir, bpf_fd, src_fd, &fuse_dev), 0);
-	FUSE_ACTION
+	FUSE_START_DAEMON();
+	if (action) {
 		int fd = -1;
 
 		TESTEQUAL(s_open(s_path(s(mount_dir), s(file1_name)), O_RDONLY),
@@ -2011,9 +1999,9 @@ static int bpf_test_lookup_postfilter(const char *mount_dir)
 		TESTSYSCALL(close(fd));
 		TESTEQUAL(s_open(s_path(s(mount_dir), s(file3_name)), O_RDONLY),
 			  -1);
-	FUSE_DAEMON
-		struct fuse_in_header *in_header =
-				(struct fuse_in_header *)bytes_in;
+	} else {
+		struct fuse_in_postfilter_header *in_header =
+				(struct fuse_in_postfilter_header *)bytes_in;
 		struct fuse_entry_out *feo;
 		struct fuse_entry_bpf_out *febo;
 
@@ -2030,10 +2018,9 @@ static int bpf_test_lookup_postfilter(const char *mount_dir)
 		TESTFUSELOOKUP(file3_name, FUSE_POSTFILTER);
 		TESTEQUAL(in_header->error_in, -ENOENT);
 		TESTFUSEOUTERROR(-ENOENT);
-	FUSE_DONE
-
-	result = TEST_SUCCESS;
-out:
+		exit(TEST_SUCCESS);
+	}
+	FUSE_END_DAEMON();
 	close(file_fd);
 	close(fuse_dev);
 	umount(mount_dir);

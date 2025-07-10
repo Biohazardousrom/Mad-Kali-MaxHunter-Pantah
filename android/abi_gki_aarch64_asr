@@ -1,8 +1,6 @@
 [abi_symbol_list]
 
 # required by asr5803.ko
-  cfg80211_rx_spurious_frame
-  cfg80211_rx_unexpected_4addr_frame
   sdhci_enable_sdio_irq
 
 # required by asr_serial.ko
@@ -43,3 +41,17 @@
 # required by asr_drm.ko
   clk_set_rate_exclusive
   clk_rate_exclusive_put
+
+# required by mercury.ko
+  media_device_register_entity
+  media_device_unregister_entity
+  v4l2_ctrl_get_menu
+  v4l2_ctrl_type_op_equal
+  v4l2_ctrl_type_op_init
+  v4l2_ctrl_type_op_log
+  v4l2_m2m_buf_done_and_job_finish
+  v4l2_m2m_last_buf
+
+# required by jpu_heap.ko
+  kmem_cache_size
+  memset16

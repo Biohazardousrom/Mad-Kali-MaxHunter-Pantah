@@ -12,6 +12,11 @@ Linux Virtualization Support
    paravirt_ops
    guest-halt-polling
    ne_overview
+   acrn/index
+   coco/sev-guest
+   hyperv/index
+   gunyah/index
+   geniezone/introduction
 
 .. only:: html and subproject
 

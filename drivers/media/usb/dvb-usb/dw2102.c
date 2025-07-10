@@ -716,6 +716,7 @@ static int su3000_i2c_transfer(struct i2c_adapter *adap, struct i2c_msg msg[],
 {
 	struct dvb_usb_device *d = i2c_get_adapdata(adap);
 	struct dw2102_state *state;
+	int j;
 
 	if (!d)
 		return -ENODEV;
@@ -729,11 +730,11 @@ static int su3000_i2c_transfer(struct i2c_adapter *adap, struct i2c_msg msg[],
 		return -EAGAIN;
 	}
 
-	switch (num) {
-	case 1:
-		switch (msg[0].addr) {
+	j = 0;
+	while (j < num) {
+		switch (msg[j].addr) {
 		case SU3000_STREAM_CTRL:
-			state->data[0] = msg[0].buf[0] + 0x36;
+			state->data[0] = msg[j].buf[0] + 0x36;
 			state->data[1] = 3;
 			state->data[2] = 0;
 			if (dvb_usb_generic_rw(d, state->data, 3,
@@ -745,61 +746,86 @@ static int su3000_i2c_transfer(struct i2c_adapter *adap, struct i2c_msg msg[],
 			if (dvb_usb_generic_rw(d, state->data, 1,
 					state->data, 2, 0) < 0)
 				err("i2c transfer failed.");
-			msg[0].buf[1] = state->data[0];
-			msg[0].buf[0] = state->data[1];
+			msg[j].buf[1] = state->data[0];
+			msg[j].buf[0] = state->data[1];
 			break;
 		default:
-			if (3 + msg[0].len > sizeof(state->data)) {
-				warn("i2c wr: len=%d is too big!\n",
-				     msg[0].len);
+			/* if the current write msg is followed by a another
+			 * read msg to/from the same address
+			 */
+			if ((j+1 < num) && (msg[j+1].flags & I2C_M_RD) &&
+			    (msg[j].addr == msg[j+1].addr)) {
+				/* join both i2c msgs to one usb read command */
+				if (4 + msg[j].len > sizeof(state->data)) {
+					warn("i2c combined wr/rd: write len=%d is too big!\n",
+					    msg[j].len);
+					num = -EOPNOTSUPP;
+					break;
+				}
+				if (1 + msg[j+1].len > sizeof(state->data)) {
+					warn("i2c combined wr/rd: read len=%d is too big!\n",
+					    msg[j+1].len);
+					num = -EOPNOTSUPP;
+					break;
+				}
+
+				state->data[0] = 0x09;
+				state->data[1] = msg[j].len;
+				state->data[2] = msg[j+1].len;
+				state->data[3] = msg[j].addr;
+				memcpy(&state->data[4], msg[j].buf, msg[j].len);
+
+				if (dvb_usb_generic_rw(d, state->data, msg[j].len + 4,
+					state->data, msg[j+1].len + 1, 0) < 0)
+					err("i2c transfer failed.");
+
+				memcpy(msg[j+1].buf, &state->data[1], msg[j+1].len);
+				j++;
+				break;
+			}
+
+			if (msg[j].flags & I2C_M_RD) {
+				/* single read */
+				if (4 + msg[j].len > sizeof(state->data)) {
+					warn("i2c rd: len=%d is too big!\n", msg[j].len);
+					num = -EOPNOTSUPP;
+					break;
+				}
+
+				state->data[0] = 0x09;
+				state->data[1] = 0;
+				state->data[2] = msg[j].len;
+				state->data[3] = msg[j].addr;
+				memcpy(&state->data[4], msg[j].buf, msg[j].len);
+
+				if (dvb_usb_generic_rw(d, state->data, 4,
+					state->data, msg[j].len + 1, 0) < 0)
+					err("i2c transfer failed.");
+
+				memcpy(msg[j].buf, &state->data[1], msg[j].len);
+				break;
+			}
+
+			/* single write */
+			if (3 + msg[j].len > sizeof(state->data)) {
+				warn("i2c wr: len=%d is too big!\n", msg[j].len);
 				num = -EOPNOTSUPP;
 				break;
 			}
 
-			/* always i2c write*/
 			state->data[0] = 0x08;
-			state->data[1] = msg[0].addr;
-			state->data[2] = msg[0].len;
+			state->data[1] = msg[j].addr;
+			state->data[2] = msg[j].len;
 
-			memcpy(&state->data[3], msg[0].buf, msg[0].len);
+			memcpy(&state->data[3], msg[j].buf, msg[j].len);
 
-			if (dvb_usb_generic_rw(d, state->data, msg[0].len + 3,
+			if (dvb_usb_generic_rw(d, state->data, msg[j].len + 3,
 						state->data, 1, 0) < 0)
 				err("i2c transfer failed.");
+		} // switch
+		j++;
 
-		}
-		break;
-	case 2:
-		/* always i2c read */
-		if (4 + msg[0].len > sizeof(state->data)) {
-			warn("i2c rd: len=%d is too big!\n",
-			     msg[0].len);
-			num = -EOPNOTSUPP;
-			break;
-		}
-		if (1 + msg[1].len > sizeof(state->data)) {
-			warn("i2c rd: len=%d is too big!\n",
-			     msg[1].len);
-			num = -EOPNOTSUPP;
-			break;
-		}
-
-		state->data[0] = 0x09;
-		state->data[1] = msg[0].len;
-		state->data[2] = msg[1].len;
-		state->data[3] = msg[0].addr;
-		memcpy(&state->data[4], msg[0].buf, msg[0].len);
-
-		if (dvb_usb_generic_rw(d, state->data, msg[0].len + 4,
-					state->data, msg[1].len + 1, 0) < 0)
-			err("i2c transfer failed.");
-
-		memcpy(msg[1].buf, &state->data[1], msg[1].len);
-		break;
-	default:
-		warn("more than 2 i2c messages at a time is not handled yet.");
-		break;
-	}
+	} // while
 	mutex_unlock(&d->data_mutex);
 	mutex_unlock(&d->i2c_mutex);
 	return num;
@@ -1794,10 +1820,11 @@ enum dw2102_table_entry {
 	TEVII_S660,
 	PROF_7500,
 	GENIATECH_SU3000,
-	TERRATEC_CINERGY_S2,
+	HAUPPAUGE_MAX_S2,
+	TERRATEC_CINERGY_S2_R1,
 	TEVII_S480_1,
 	TEVII_S480_2,
-	X3M_SPC1400HD,
+	GENIATECH_X3M_SPC1400HD,
 	TEVII_S421,
 	TEVII_S632,
 	TERRATEC_CINERGY_S2_R2,
@@ -1807,7 +1834,7 @@ enum dw2102_table_entry {
 	TERRATEC_CINERGY_S2_2,
 	GOTVIEW_SAT_HD,
 	GENIATECH_T220,
-	TECHNOTREND_S2_4600,
+	TECHNOTREND_CONNECT_S2_4600,
 	TEVII_S482_1,
 	TEVII_S482_2,
 	TERRATEC_CINERGY_S2_BOX,
@@ -1815,41 +1842,36 @@ enum dw2102_table_entry {
 };
 
 static struct usb_device_id dw2102_table[] = {
-	[CYPRESS_DW2102] = {USB_DEVICE(USB_VID_CYPRESS, USB_PID_DW2102)},
-	[CYPRESS_DW2101] = {USB_DEVICE(USB_VID_CYPRESS, 0x2101)},
-	[CYPRESS_DW2104] = {USB_DEVICE(USB_VID_CYPRESS, USB_PID_DW2104)},
-	[TEVII_S650] = {USB_DEVICE(0x9022, USB_PID_TEVII_S650)},
-	[TERRATEC_CINERGY_S] = {USB_DEVICE(USB_VID_TERRATEC, USB_PID_TERRATEC_CINERGY_S)},
-	[CYPRESS_DW3101] = {USB_DEVICE(USB_VID_CYPRESS, USB_PID_DW3101)},
-	[TEVII_S630] = {USB_DEVICE(0x9022, USB_PID_TEVII_S630)},
-	[PROF_1100] = {USB_DEVICE(0x3011, USB_PID_PROF_1100)},
-	[TEVII_S660] = {USB_DEVICE(0x9022, USB_PID_TEVII_S660)},
-	[PROF_7500] = {USB_DEVICE(0x3034, 0x7500)},
-	[GENIATECH_SU3000] = {USB_DEVICE(0x1f4d, 0x3000)},
-	[TERRATEC_CINERGY_S2] = {USB_DEVICE(USB_VID_TERRATEC, USB_PID_TERRATEC_CINERGY_S2_R1)},
-	[TEVII_S480_1] = {USB_DEVICE(0x9022, USB_PID_TEVII_S480_1)},
-	[TEVII_S480_2] = {USB_DEVICE(0x9022, USB_PID_TEVII_S480_2)},
-	[X3M_SPC1400HD] = {USB_DEVICE(0x1f4d, 0x3100)},
-	[TEVII_S421] = {USB_DEVICE(0x9022, USB_PID_TEVII_S421)},
-	[TEVII_S632] = {USB_DEVICE(0x9022, USB_PID_TEVII_S632)},
-	[TERRATEC_CINERGY_S2_R2] = {USB_DEVICE(USB_VID_TERRATEC,
-				    USB_PID_TERRATEC_CINERGY_S2_R2)},
-	[TERRATEC_CINERGY_S2_R3] = {USB_DEVICE(USB_VID_TERRATEC,
-				    USB_PID_TERRATEC_CINERGY_S2_R3)},
-	[TERRATEC_CINERGY_S2_R4] = {USB_DEVICE(USB_VID_TERRATEC,
-				    USB_PID_TERRATEC_CINERGY_S2_R4)},
-	[TERRATEC_CINERGY_S2_1] = {USB_DEVICE(USB_VID_TERRATEC_2,
-				   USB_PID_TERRATEC_CINERGY_S2_1)},
-	[TERRATEC_CINERGY_S2_2] = {USB_DEVICE(USB_VID_TERRATEC_2,
-				   USB_PID_TERRATEC_CINERGY_S2_2)},
-	[GOTVIEW_SAT_HD] = {USB_DEVICE(0x1FE1, USB_PID_GOTVIEW_SAT_HD)},
-	[GENIATECH_T220] = {USB_DEVICE(0x1f4d, 0xD220)},
-	[TECHNOTREND_S2_4600] = {USB_DEVICE(USB_VID_TECHNOTREND,
-		USB_PID_TECHNOTREND_CONNECT_S2_4600)},
-	[TEVII_S482_1] = {USB_DEVICE(0x9022, 0xd483)},
-	[TEVII_S482_2] = {USB_DEVICE(0x9022, 0xd484)},
-	[TERRATEC_CINERGY_S2_BOX] = {USB_DEVICE(USB_VID_TERRATEC, 0x0105)},
-	[TEVII_S662] = {USB_DEVICE(0x9022, USB_PID_TEVII_S662)},
+	DVB_USB_DEV(CYPRESS, CYPRESS_DW2102),
+	DVB_USB_DEV(CYPRESS, CYPRESS_DW2101),
+	DVB_USB_DEV(CYPRESS, CYPRESS_DW2104),
+	DVB_USB_DEV(TEVII, TEVII_S650),
+	DVB_USB_DEV(TERRATEC, TERRATEC_CINERGY_S),
+	DVB_USB_DEV(CYPRESS, CYPRESS_DW3101),
+	DVB_USB_DEV(TEVII, TEVII_S630),
+	DVB_USB_DEV(PROF_1, PROF_1100),
+	DVB_USB_DEV(TEVII, TEVII_S660),
+	DVB_USB_DEV(PROF_2, PROF_7500),
+	DVB_USB_DEV(GTEK, GENIATECH_SU3000),
+	DVB_USB_DEV(HAUPPAUGE, HAUPPAUGE_MAX_S2),
+	DVB_USB_DEV(TERRATEC, TERRATEC_CINERGY_S2_R1),
+	DVB_USB_DEV(TEVII, TEVII_S480_1),
+	DVB_USB_DEV(TEVII, TEVII_S480_2),
+	DVB_USB_DEV(GTEK, GENIATECH_X3M_SPC1400HD),
+	DVB_USB_DEV(TEVII, TEVII_S421),
+	DVB_USB_DEV(TEVII, TEVII_S632),
+	DVB_USB_DEV(TERRATEC, TERRATEC_CINERGY_S2_R2),
+	DVB_USB_DEV(TERRATEC, TERRATEC_CINERGY_S2_R3),
+	DVB_USB_DEV(TERRATEC, TERRATEC_CINERGY_S2_R4),
+	DVB_USB_DEV(TERRATEC_2, TERRATEC_CINERGY_S2_1),
+	DVB_USB_DEV(TERRATEC_2, TERRATEC_CINERGY_S2_2),
+	DVB_USB_DEV(GOTVIEW, GOTVIEW_SAT_HD),
+	DVB_USB_DEV(GTEK, GENIATECH_T220),
+	DVB_USB_DEV(TECHNOTREND, TECHNOTREND_CONNECT_S2_4600),
+	DVB_USB_DEV(TEVII, TEVII_S482_1),
+	DVB_USB_DEV(TEVII, TEVII_S482_2),
+	DVB_USB_DEV(TERRATEC, TERRATEC_CINERGY_S2_BOX),
+	DVB_USB_DEV(TEVII, TEVII_S662),
 	{ }
 };
 
@@ -1911,18 +1933,18 @@ static int dw2102_load_firmware(struct usb_device *dev,
 		case USB_PID_TEVII_S650:
 			dw2104_properties.rc.core.rc_codes = RC_MAP_TEVII_NEC;
 			fallthrough;
-		case USB_PID_DW2104:
+		case USB_PID_CYPRESS_DW2104:
 			reset = 1;
 			dw210x_op_rw(dev, 0xc4, 0x0000, 0, &reset, 1,
 					DW210X_WRITE_MSG);
 			fallthrough;
-		case USB_PID_DW3101:
+		case USB_PID_CYPRESS_DW3101:
 			reset = 0;
 			dw210x_op_rw(dev, 0xbf, 0x0040, 0, &reset, 0,
 					DW210X_WRITE_MSG);
 			break;
 		case USB_PID_TERRATEC_CINERGY_S:
-		case USB_PID_DW2102:
+		case USB_PID_CYPRESS_DW2102:
 			dw210x_op_rw(dev, 0xbf, 0x0040, 0, &reset, 0,
 					DW210X_WRITE_MSG);
 			dw210x_op_rw(dev, 0xb9, 0x0000, 0, &reset16[0], 2,
@@ -2361,18 +2383,22 @@ static struct dvb_usb_device_properties su3000_properties = {
 		}},
 		}
 	},
-	.num_device_descs = 8,
+	.num_device_descs = 9,
 	.devices = {
 		{ "SU3000HD DVB-S USB2.0",
 			{ &dw2102_table[GENIATECH_SU3000], NULL },
 			{ NULL },
 		},
+		{ "Hauppauge MAX S2 or WinTV NOVA HD USB2.0",
+			{ &dw2102_table[HAUPPAUGE_MAX_S2], NULL },
+			{ NULL },
+		},
 		{ "Terratec Cinergy S2 USB HD",
-			{ &dw2102_table[TERRATEC_CINERGY_S2], NULL },
+			{ &dw2102_table[TERRATEC_CINERGY_S2_R1], NULL },
 			{ NULL },
 		},
 		{ "X3M TV SPC1400HD PCI",
-			{ &dw2102_table[X3M_SPC1400HD], NULL },
+			{ &dw2102_table[GENIATECH_X3M_SPC1400HD], NULL },
 			{ NULL },
 		},
 		{ "Terratec Cinergy S2 USB HD Rev.2",
@@ -2543,7 +2569,7 @@ static struct dvb_usb_device_properties tt_s2_4600_properties = {
 	.num_device_descs = 5,
 	.devices = {
 		{ "TechnoTrend TT-connect S2-4600",
-			{ &dw2102_table[TECHNOTREND_S2_4600], NULL },
+			{ &dw2102_table[TECHNOTREND_CONNECT_S2_4600], NULL },
 			{ NULL },
 		},
 		{ "TeVii S482 (tuner 1)",

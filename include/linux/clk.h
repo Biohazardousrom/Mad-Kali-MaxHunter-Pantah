@@ -92,7 +92,7 @@ struct clk_bulk_data {
 #ifdef CONFIG_COMMON_CLK
 
 /**
- * clk_notifier_register: register a clock rate-change notifier callback
+ * clk_notifier_register - register a clock rate-change notifier callback
  * @clk: clock whose rate we are interested in
  * @nb: notifier block with callback function pointer
  *
@@ -103,7 +103,7 @@ struct clk_bulk_data {
 int clk_notifier_register(struct clk *clk, struct notifier_block *nb);
 
 /**
- * clk_notifier_unregister: unregister a clock rate-change notifier callback
+ * clk_notifier_unregister - unregister a clock rate-change notifier callback
  * @clk: clock whose rate we are no longer interested in
  * @nb: notifier block which will be unregistered
  */
@@ -161,7 +161,7 @@ int clk_get_phase(struct clk *clk);
 int clk_set_duty_cycle(struct clk *clk, unsigned int num, unsigned int den);
 
 /**
- * clk_get_duty_cycle - return the duty cycle ratio of a clock signal
+ * clk_get_scaled_duty_cycle - return the duty cycle ratio of a clock signal
  * @clk: clock signal source
  * @scale: scaling factor to be applied to represent the ratio as an integer
  *
@@ -278,6 +278,7 @@ static inline void clk_rate_exclusive_put(struct clk *clk) {}
 
 #endif
 
+#ifdef CONFIG_HAVE_CLK_PREPARE
 /**
  * clk_prepare - prepare a clock source
  * @clk: clock source
@@ -286,10 +287,26 @@ static inline void clk_rate_exclusive_put(struct clk *clk) {}
  *
  * Must not be called from within atomic context.
  */
-#ifdef CONFIG_HAVE_CLK_PREPARE
 int clk_prepare(struct clk *clk);
 int __must_check clk_bulk_prepare(int num_clks,
 				  const struct clk_bulk_data *clks);
+
+/**
+ * clk_is_enabled_when_prepared - indicate if preparing a clock also enables it.
+ * @clk: clock source
+ *
+ * Returns true if clk_prepare() implicitly enables the clock, effectively
+ * making clk_enable()/clk_disable() no-ops, false otherwise.
+ *
+ * This is of interest mainly to the power management code where actually
+ * disabling the clock also requires unpreparing it to have any material
+ * effect.
+ *
+ * Regardless of the value returned here, the caller must always invoke
+ * clk_enable() or clk_prepare_enable()  and counterparts for usage counts
+ * to be right.
+ */
+bool clk_is_enabled_when_prepared(struct clk *clk);
 #else
 static inline int clk_prepare(struct clk *clk)
 {
@@ -302,6 +319,11 @@ clk_bulk_prepare(int num_clks, const struct clk_bulk_data *clks)
 {
 	might_sleep();
 	return 0;
+}
+
+static inline bool clk_is_enabled_when_prepared(struct clk *clk)
+{
+	return false;
 }
 #endif
 
@@ -461,15 +483,16 @@ int __must_check devm_clk_bulk_get_all(struct device *dev,
  * @dev: device for clock "consumer"
  * @id: clock consumer ID
  *
- * Returns a struct clk corresponding to the clock producer, or
+ * Context: May sleep.
+ *
+ * Return: a struct clk corresponding to the clock producer, or
  * valid IS_ERR() condition containing errno.  The implementation
  * uses @dev and @id to determine the clock consumer, and thereby
  * the clock producer.  (IOW, @id may be identical strings, but
  * clk_get may return different clock producers depending on @dev.)
  *
- * Drivers must assume that the clock source is not enabled.
- *
- * devm_clk_get should not be called from within interrupt context.
+ * Drivers must assume that the clock source is neither prepared nor
+ * enabled.
  *
  * The clock will automatically be freed when the device is unbound
  * from the bus.
@@ -523,8 +546,20 @@ struct clk *devm_clk_get_enabled(struct device *dev, const char *id);
  * @dev: device for clock "consumer"
  * @id: clock consumer ID
  *
- * Behaves the same as devm_clk_get() except where there is no clock producer.
- * In this case, instead of returning -ENOENT, the function returns NULL.
+ * Context: May sleep.
+ *
+ * Return: a struct clk corresponding to the clock producer, or
+ * valid IS_ERR() condition containing errno.  The implementation
+ * uses @dev and @id to determine the clock consumer, and thereby
+ * the clock producer.  If no such clk is found, it returns NULL
+ * which serves as a dummy clk.  That's the only difference compared
+ * to devm_clk_get().
+ *
+ * Drivers must assume that the clock source is neither prepared nor
+ * enabled.
+ *
+ * The clock will automatically be freed when the device is unbound
+ * from the bus.
  */
 struct clk *devm_clk_get_optional(struct device *dev, const char *id);
 
@@ -772,7 +807,7 @@ int clk_set_rate_exclusive(struct clk *clk, unsigned long rate);
  *
  * Returns true if @parent is a possible parent for @clk, false otherwise.
  */
-bool clk_has_parent(struct clk *clk, struct clk *parent);
+bool clk_has_parent(const struct clk *clk, const struct clk *parent);
 
 /**
  * clk_set_rate_range - set a rate range for a clock source
@@ -1071,6 +1106,17 @@ static inline void clk_bulk_disable_unprepare(int num_clks,
 {
 	clk_bulk_disable(num_clks, clks);
 	clk_bulk_unprepare(num_clks, clks);
+}
+
+/**
+ * clk_drop_range - Reset any range set on that clock
+ * @clk: clock source
+ *
+ * Returns success (0) or negative errno.
+ */
+static inline int clk_drop_range(struct clk *clk)
+{
+	return clk_set_rate_range(clk, 0, ULONG_MAX);
 }
 
 /**

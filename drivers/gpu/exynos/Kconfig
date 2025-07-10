@@ -1,3 +1,0 @@
-menu "Exynos Graphic Devices"
-source "drivers/gpu/exynos/g2d/Kconfig"
-endmenu

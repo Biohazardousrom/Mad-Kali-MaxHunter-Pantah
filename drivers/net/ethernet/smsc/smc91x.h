@@ -175,23 +175,12 @@ static inline void mcf_outsw(void *a, unsigned char *p, int l)
 		writew(*wp++, a);
 }
 
-#define SMC_inw(a, r)		_swapw(readw((a) + (r)))
-#define SMC_outw(lp, v, a, r)	writew(_swapw(v), (a) + (r))
+#define SMC_inw(a, r)		ioread16be((a) + (r))
+#define SMC_outw(lp, v, a, r)	iowrite16be(v, (a) + (r))
 #define SMC_insw(a, r, p, l)	mcf_insw(a + r, p, l)
 #define SMC_outsw(a, r, p, l)	mcf_outsw(a + r, p, l)
 
 #define SMC_IRQ_FLAGS		0
-
-#elif defined(CONFIG_H8300)
-#define SMC_CAN_USE_8BIT	1
-#define SMC_CAN_USE_16BIT	0
-#define SMC_CAN_USE_32BIT	0
-#define SMC_NOWAIT		0
-
-#define SMC_inb(a, r)		ioread8((a) + (r))
-#define SMC_outb(v, a, r)	iowrite8(v, (a) + (r))
-#define SMC_insb(a, r, p, l)	ioread8_rep((a) + (r), p, l)
-#define SMC_outsb(a, r, p, l)	iowrite8_rep((a) + (r), p, l)
 
 #else
 

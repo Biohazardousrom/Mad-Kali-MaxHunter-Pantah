@@ -9,19 +9,6 @@
  *
  * Copyright (c) 2020 Oracle and/or its affiliates.
  * Author: Daniel Jordan <daniel.m.jordan@oracle.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin St - Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
 #include <linux/completion.h>
@@ -111,7 +98,7 @@ static int __init padata_work_alloc_mt(int nworks, void *data,
 {
 	int i;
 
-	spin_lock(&padata_works_lock);
+	spin_lock_bh(&padata_works_lock);
 	/* Start at 1 because the current task participates in the job. */
 	for (i = 1; i < nworks; ++i) {
 		struct padata_work *pw = padata_work_alloc();
@@ -121,7 +108,7 @@ static int __init padata_work_alloc_mt(int nworks, void *data,
 		padata_work_init(pw, padata_mt_helper, data, 0);
 		list_add(&pw->pw_list, head);
 	}
-	spin_unlock(&padata_works_lock);
+	spin_unlock_bh(&padata_works_lock);
 
 	return i;
 }
@@ -139,12 +126,12 @@ static void __init padata_works_free(struct list_head *works)
 	if (list_empty(works))
 		return;
 
-	spin_lock(&padata_works_lock);
+	spin_lock_bh(&padata_works_lock);
 	list_for_each_entry_safe(cur, next, works, pw_list) {
 		list_del(&cur->pw_list);
 		padata_work_free(cur);
 	}
-	spin_unlock(&padata_works_lock);
+	spin_unlock_bh(&padata_works_lock);
 }
 
 static void padata_parallel_worker(struct work_struct *parallel_work)
@@ -194,7 +181,7 @@ int padata_do_parallel(struct padata_shell *ps,
 		goto out;
 
 	if (!cpumask_test_cpu(*cb_cpu, pd->cpumask.cbcpu)) {
-		if (!cpumask_weight(pd->cpumask.cbcpu))
+		if (cpumask_empty(pd->cpumask.cbcpu))
 			goto out;
 
 		/* Select an alternate fallback CPU and notify the caller. */
@@ -738,7 +725,7 @@ int padata_set_cpumask(struct padata_instance *pinst, int cpumask_type,
 	struct cpumask *serial_mask, *parallel_mask;
 	int err = -EINVAL;
 
-	get_online_cpus();
+	cpus_read_lock();
 	mutex_lock(&pinst->lock);
 
 	switch (cpumask_type) {
@@ -758,7 +745,7 @@ int padata_set_cpumask(struct padata_instance *pinst, int cpumask_type,
 
 out:
 	mutex_unlock(&pinst->lock);
-	put_online_cpus();
+	cpus_read_unlock();
 
 	return err;
 }
@@ -997,7 +984,7 @@ struct padata_instance *padata_alloc(const char *name)
 	if (!pinst->parallel_wq)
 		goto err_free_inst;
 
-	get_online_cpus();
+	cpus_read_lock();
 
 	pinst->serial_wq = alloc_workqueue("%s_serial", WQ_MEM_RECLAIM |
 					   WQ_CPU_INTENSIVE, 1, name);
@@ -1031,7 +1018,7 @@ struct padata_instance *padata_alloc(const char *name)
 						    &pinst->cpu_dead_node);
 #endif
 
-	put_online_cpus();
+	cpus_read_unlock();
 
 	return pinst;
 
@@ -1041,7 +1028,7 @@ err_free_masks:
 err_free_serial_wq:
 	destroy_workqueue(pinst->serial_wq);
 err_put_cpus:
-	put_online_cpus();
+	cpus_read_unlock();
 	destroy_workqueue(pinst->parallel_wq);
 err_free_inst:
 	kfree(pinst);
@@ -1079,9 +1066,9 @@ struct padata_shell *padata_alloc_shell(struct padata_instance *pinst)
 
 	ps->pinst = pinst;
 
-	get_online_cpus();
+	cpus_read_lock();
 	pd = padata_alloc_pd(ps);
-	put_online_cpus();
+	cpus_read_unlock();
 
 	if (!pd)
 		goto out_free_ps;

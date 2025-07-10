@@ -12,7 +12,6 @@
  */
 struct file;
 union bpf_attr;
-
 DECLARE_HOOK(android_vh_check_mmap_file,
 	TP_PROTO(const struct file *file, unsigned long prot,
 		unsigned long flag, unsigned long ret),

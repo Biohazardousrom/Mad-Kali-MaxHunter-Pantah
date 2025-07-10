@@ -8,11 +8,10 @@
 #include <linux/types.h>
 
 /*
- * Accesses to struct hyp_page flags must be serialized by the host stage-2
- * page-table lock due to the lack of atomics at EL2.
+ * Accesses to struct hyp_page flags are serialized by the host stage-2
+ * page-table lock.
  */
-#define HOST_PAGE_NEED_POISONING	BIT(0)
-#define HOST_PAGE_PENDING_RECLAIM	BIT(1)
+#define MODULE_OWNED_PAGE		BIT(0)
 
 struct hyp_page {
 	unsigned short refcount;
@@ -20,7 +19,6 @@ struct hyp_page {
 	u8 flags;
 };
 
-extern s64 hyp_physvirt_offset;
 extern u64 __hyp_vmemmap;
 #define hyp_vmemmap ((struct hyp_page *)__hyp_vmemmap)
 
@@ -47,6 +45,10 @@ static inline phys_addr_t hyp_virt_to_phys(void *addr)
 #define hyp_page_to_virt(page)	__hyp_va(hyp_page_to_phys(page))
 #define hyp_page_to_pool(page)	(((struct hyp_page *)page)->pool)
 
+/*
+ * Refcounting for 'struct hyp_page'.
+ * hyp_pool::lock must be held if atomic access to the refcount is required.
+ */
 static inline int hyp_page_count(void *addr)
 {
 	struct hyp_page *p = hyp_virt_to_page(addr);

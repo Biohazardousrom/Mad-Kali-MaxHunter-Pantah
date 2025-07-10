@@ -14,8 +14,6 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 
-#include <trace/hooks/mmc_core.h>
-
 #include "slot-gpio.h"
 
 struct mmc_gpio {
@@ -32,11 +30,6 @@ static irqreturn_t mmc_gpio_cd_irqt(int irq, void *dev_id)
 	/* Schedule a card detection after a debounce timeout */
 	struct mmc_host *host = dev_id;
 	struct mmc_gpio *ctx = host->slot.handler_priv;
-	bool allow = true;
-
-	trace_android_vh_mmc_gpio_cd_irqt(host, &allow);
-	if (!allow)
-		return IRQ_HANDLED;
 
 	host->trigger_card_event = true;
 	mmc_detect_change(host, msecs_to_jiffies(ctx->cd_debounce_delay_ms));
@@ -46,24 +39,24 @@ static irqreturn_t mmc_gpio_cd_irqt(int irq, void *dev_id)
 
 int mmc_gpio_alloc(struct mmc_host *host)
 {
-	struct mmc_gpio *ctx = devm_kzalloc(host->parent,
-					    sizeof(*ctx), GFP_KERNEL);
+	const char *devname = dev_name(host->parent);
+	struct mmc_gpio *ctx;
 
-	if (ctx) {
-		ctx->cd_debounce_delay_ms = 200;
-		ctx->cd_label = devm_kasprintf(host->parent, GFP_KERNEL,
-				"%s cd", dev_name(host->parent));
-		if (!ctx->cd_label)
-			return -ENOMEM;
-		ctx->ro_label = devm_kasprintf(host->parent, GFP_KERNEL,
-				"%s ro", dev_name(host->parent));
-		if (!ctx->ro_label)
-			return -ENOMEM;
-		host->slot.handler_priv = ctx;
-		host->slot.cd_irq = -EINVAL;
-	}
+	ctx = devm_kzalloc(host->parent, sizeof(*ctx), GFP_KERNEL);
+	if (!ctx)
+		return -ENOMEM;
 
-	return ctx ? 0 : -ENOMEM;
+	ctx->cd_debounce_delay_ms = 200;
+	ctx->cd_label = devm_kasprintf(host->parent, GFP_KERNEL, "%s cd", devname);
+	if (!ctx->cd_label)
+		return -ENOMEM;
+	ctx->ro_label = devm_kasprintf(host->parent, GFP_KERNEL, "%s ro", devname);
+	if (!ctx->ro_label)
+		return -ENOMEM;
+	host->slot.handler_priv = ctx;
+	host->slot.cd_irq = -EINVAL;
+
+	return 0;
 }
 
 int mmc_gpio_get_ro(struct mmc_host *host)
@@ -189,6 +182,10 @@ int mmc_gpiod_request_cd(struct mmc_host *host, const char *con_id,
 	if (IS_ERR(desc))
 		return PTR_ERR(desc);
 
+	/* Update default label if no con_id provided */
+	if (!con_id)
+		gpiod_set_consumer_name(desc, ctx->cd_label);
+
 	if (debounce) {
 		ret = gpiod_set_debounce(desc, debounce);
 		if (ret < 0)
@@ -208,6 +205,26 @@ int mmc_gpiod_request_cd(struct mmc_host *host, const char *con_id,
 	return 0;
 }
 EXPORT_SYMBOL(mmc_gpiod_request_cd);
+
+/**
+ * mmc_gpiod_set_cd_config - set config for card-detection GPIO
+ * @host: mmc host
+ * @config: Generic pinconf config (from pinconf_to_config_packed())
+ *
+ * This can be used by mmc host drivers to fixup a card-detection GPIO's config
+ * (e.g. set PIN_CONFIG_BIAS_PULL_UP) after acquiring the GPIO descriptor
+ * through mmc_gpiod_request_cd().
+ *
+ * Returns:
+ * 0 on success, or a negative errno value on error.
+ */
+int mmc_gpiod_set_cd_config(struct mmc_host *host, unsigned long config)
+{
+	struct mmc_gpio *ctx = host->slot.handler_priv;
+
+	return gpiod_set_config(ctx->cd_gpio, config);
+}
+EXPORT_SYMBOL(mmc_gpiod_set_cd_config);
 
 bool mmc_can_gpio_cd(struct mmc_host *host)
 {
@@ -236,6 +253,10 @@ int mmc_gpiod_request_ro(struct mmc_host *host, const char *con_id,
 	desc = devm_gpiod_get_index(host->parent, con_id, idx, GPIOD_IN);
 	if (IS_ERR(desc))
 		return PTR_ERR(desc);
+
+	/* Update default label if no con_id provided */
+	if (!con_id)
+		gpiod_set_consumer_name(desc, ctx->ro_label);
 
 	if (debounce) {
 		ret = gpiod_set_debounce(desc, debounce);

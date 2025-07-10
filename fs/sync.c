@@ -3,12 +3,12 @@
  * High-level sync()-related operations
  */
 
+#include <linux/blkdev.h>
 #include <linux/kernel.h>
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/slab.h>
 #include <linux/export.h>
-#include <linux/module.h>
 #include <linux/namei.h>
 #include <linux/sched/xacct.h>
 #include <linux/writeback.h>
@@ -18,9 +18,6 @@
 #include <linux/quotaops.h>
 #include <linux/backing-dev.h>
 #include "internal.h"
-
-bool fsync_enabled = true;
-module_param(fsync_enabled, bool, 0644);
 
 #define VALID_FLAGS (SYNC_FILE_RANGE_WAIT_BEFORE|SYNC_FILE_RANGE_WRITE| \
 			SYNC_FILE_RANGE_WAIT_AFTER)
@@ -49,7 +46,7 @@ int sync_filesystem(struct super_block *sb)
 	/*
 	 * Do the filesystem syncing work.  For simple filesystems
 	 * writeback_inodes_sb(sb) just dirties buffers with inodes so we have
-	 * to submit I/O for these buffers via __sync_blockdev().  This also
+	 * to submit I/O for these buffers via sync_blockdev().  This also
 	 * speeds up the wait == 1 case since in that case write_inode()
 	 * methods call sync_dirty_buffer() and thus effectively write one block
 	 * at a time.
@@ -60,7 +57,7 @@ int sync_filesystem(struct super_block *sb)
 		if (ret)
 			return ret;
 	}
-	ret = __sync_blockdev(sb->s_bdev, 0);
+	ret = sync_blockdev_nowait(sb->s_bdev);
 	if (ret)
 		return ret;
 
@@ -70,9 +67,9 @@ int sync_filesystem(struct super_block *sb)
 		if (ret)
 			return ret;
 	}
-	return __sync_blockdev(sb->s_bdev, 1);
+	return sync_blockdev(sb->s_bdev);
 }
-EXPORT_SYMBOL_NS(sync_filesystem, ANDROID_GKI_VFS_EXPORT_ONLY);
+EXPORT_SYMBOL(sync_filesystem);
 
 static void sync_inodes_one_sb(struct super_block *sb, void *arg)
 {
@@ -85,21 +82,6 @@ static void sync_fs_one_sb(struct super_block *sb, void *arg)
 	if (!sb_rdonly(sb) && !(sb->s_iflags & SB_I_SKIP_SYNC) &&
 	    sb->s_op->sync_fs)
 		sb->s_op->sync_fs(sb, *(int *)arg);
-}
-
-static void fdatawrite_one_bdev(struct block_device *bdev, void *arg)
-{
-	filemap_fdatawrite(bdev->bd_inode->i_mapping);
-}
-
-static void fdatawait_one_bdev(struct block_device *bdev, void *arg)
-{
-	/*
-	 * We keep the error status of individual mapping so that
-	 * applications can catch the writeback error using fsync(2).
-	 * See filemap_fdatawait_keep_errors() for details.
-	 */
-	filemap_fdatawait_keep_errors(bdev->bd_inode->i_mapping);
 }
 
 /*
@@ -120,8 +102,8 @@ void ksys_sync(void)
 	iterate_supers(sync_inodes_one_sb, NULL);
 	iterate_supers(sync_fs_one_sb, &nowait);
 	iterate_supers(sync_fs_one_sb, &wait);
-	iterate_bdevs(fdatawrite_one_bdev, NULL);
-	iterate_bdevs(fdatawait_one_bdev, NULL);
+	sync_bdevs(false);
+	sync_bdevs(true);
 	if (unlikely(laptop_mode))
 		laptop_sync_completion();
 }
@@ -142,10 +124,10 @@ static void do_sync_work(struct work_struct *work)
 	 */
 	iterate_supers(sync_inodes_one_sb, &nowait);
 	iterate_supers(sync_fs_one_sb, &nowait);
-	iterate_bdevs(fdatawrite_one_bdev, NULL);
+	sync_bdevs(false);
 	iterate_supers(sync_inodes_one_sb, &nowait);
 	iterate_supers(sync_fs_one_sb, &nowait);
-	iterate_bdevs(fdatawrite_one_bdev, NULL);
+	sync_bdevs(false);
 	printk("Emergency Sync complete\n");
 	kfree(work);
 }
@@ -166,14 +148,9 @@ void emergency_sync(void)
  */
 SYSCALL_DEFINE1(syncfs, int, fd)
 {
-	struct fd f;
+	struct fd f = fdget(fd);
 	struct super_block *sb;
 	int ret, ret2;
-
-	if (!fsync_enabled)
-		return 0;
-
-	f = fdget(fd);
 
 	if (!f.file)
 		return -EBADF;
@@ -204,9 +181,6 @@ int vfs_fsync_range(struct file *file, loff_t start, loff_t end, int datasync)
 {
 	struct inode *inode = file->f_mapping->host;
 
-	if (!fsync_enabled)
-		return 0;
-
 	if (!file->f_op->fsync)
 		return -EINVAL;
 	if (!datasync && (inode->i_state & I_DIRTY_TIME))
@@ -225,20 +199,14 @@ EXPORT_SYMBOL(vfs_fsync_range);
  */
 int vfs_fsync(struct file *file, int datasync)
 {
-
 	return vfs_fsync_range(file, 0, LLONG_MAX, datasync);
 }
 EXPORT_SYMBOL(vfs_fsync);
 
 static int do_fsync(unsigned int fd, int datasync)
 {
-	struct fd f;
+	struct fd f = fdget(fd);
 	int ret = -EBADF;
-
-	if (!fsync_enabled)
-		return 0;
-
-	f = fdget(fd);
 
 	if (f.file) {
 		ret = vfs_fsync(f.file, datasync);
@@ -265,9 +233,6 @@ int sync_file_range(struct file *file, loff_t offset, loff_t nbytes,
 	struct address_space *mapping;
 	loff_t endbyte;			/* inclusive */
 	umode_t i_mode;
-
-	if (!fsync_enabled)
-		return 0;
 
 	ret = -EINVAL;
 	if (flags & ~VALID_FLAGS)
@@ -408,6 +373,15 @@ SYSCALL_DEFINE4(sync_file_range, int, fd, loff_t, offset, loff_t, nbytes,
 {
 	return ksys_sync_file_range(fd, offset, nbytes, flags);
 }
+
+#if defined(CONFIG_COMPAT) && defined(__ARCH_WANT_COMPAT_SYNC_FILE_RANGE)
+COMPAT_SYSCALL_DEFINE6(sync_file_range, int, fd, compat_arg_u64_dual(offset),
+		       compat_arg_u64_dual(nbytes), unsigned int, flags)
+{
+	return ksys_sync_file_range(fd, compat_arg_u64_glue(offset),
+				    compat_arg_u64_glue(nbytes), flags);
+}
+#endif
 
 /* It would be nice if people remember that not all the world's an i386
    when they introduce new system calls */

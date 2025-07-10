@@ -9,7 +9,6 @@
 #include <linux/fs.h>
 #include <linux/blkdev.h>
 #include <linux/blk-mq.h>
-#include <linux/elevator.h>
 #include <linux/bio.h>
 #include <linux/module.h>
 #include <linux/slab.h>
@@ -18,6 +17,9 @@
 #include <linux/rbtree.h>
 #include <linux/sbitmap.h>
 
+#include <trace/events/block.h>
+
+#include "elevator.h"
 #include "blk.h"
 #include "blk-mq.h"
 #include "blk-mq-debugfs.h"
@@ -126,6 +128,20 @@ deadline_rb_root(struct dd_per_prio *per_prio, struct request *rq)
 static u8 dd_rq_ioclass(struct request *rq)
 {
 	return IOPRIO_PRIO_CLASS(req_get_ioprio(rq));
+}
+
+/*
+ * get the request before `rq' in sector-sorted order
+ */
+static inline struct request *
+deadline_earlier_request(struct request *rq)
+{
+	struct rb_node *node = rb_prev(&rq->rb_node);
+
+	if (node)
+		return rb_entry_rq(node);
+
+	return NULL;
 }
 
 /*
@@ -276,6 +292,39 @@ static inline int deadline_check_fifo(struct dd_per_prio *per_prio,
 }
 
 /*
+ * Check if rq has a sequential request preceding it.
+ */
+static bool deadline_is_seq_write(struct deadline_data *dd, struct request *rq)
+{
+	struct request *prev = deadline_earlier_request(rq);
+
+	if (!prev)
+		return false;
+
+	return blk_rq_pos(prev) + blk_rq_sectors(prev) == blk_rq_pos(rq);
+}
+
+/*
+ * Skip all write requests that are sequential from @rq, even if we cross
+ * a zone boundary.
+ */
+static struct request *deadline_skip_seq_writes(struct deadline_data *dd,
+						struct request *rq)
+{
+	sector_t pos = blk_rq_pos(rq);
+	sector_t skipped_sectors = 0;
+
+	while (rq) {
+		if (blk_rq_pos(rq) != pos + skipped_sectors)
+			break;
+		skipped_sectors += blk_rq_sectors(rq);
+		rq = deadline_latter_request(rq);
+	}
+
+	return rq;
+}
+
+/*
  * For the specified data direction, return the next request to
  * dispatch using arrival ordered lists.
  */
@@ -295,11 +344,16 @@ deadline_fifo_request(struct deadline_data *dd, struct dd_per_prio *per_prio,
 
 	/*
 	 * Look for a write request that can be dispatched, that is one with
-	 * an unlocked target zone.
+	 * an unlocked target zone. For some HDDs, breaking a sequential
+	 * write stream can lead to lower throughput, so make sure to preserve
+	 * sequential write streams, even if that stream crosses into the next
+	 * zones and these zones are unlocked.
 	 */
 	spin_lock_irqsave(&dd->zone_lock, flags);
 	list_for_each_entry(rq, &per_prio->fifo_list[DD_WRITE], queuelist) {
-		if (blk_req_can_dispatch_to_zone(rq))
+		if (blk_req_can_dispatch_to_zone(rq) &&
+		    (blk_queue_nonrot(rq->q) ||
+		     !deadline_is_seq_write(dd, rq)))
 			goto out;
 	}
 	rq = NULL;
@@ -329,13 +383,19 @@ deadline_next_request(struct deadline_data *dd, struct dd_per_prio *per_prio,
 
 	/*
 	 * Look for a write request that can be dispatched, that is one with
-	 * an unlocked target zone.
+	 * an unlocked target zone. For some HDDs, breaking a sequential
+	 * write stream can lead to lower throughput, so make sure to preserve
+	 * sequential write streams, even if that stream crosses into the next
+	 * zones and these zones are unlocked.
 	 */
 	spin_lock_irqsave(&dd->zone_lock, flags);
 	while (rq) {
 		if (blk_req_can_dispatch_to_zone(rq))
 			break;
-		rq = deadline_latter_request(rq);
+		if (blk_queue_nonrot(rq->q))
+			rq = deadline_latter_request(rq);
+		else
+			rq = deadline_skip_seq_writes(dd, rq);
 	}
 	spin_unlock_irqrestore(&dd->zone_lock, flags);
 
@@ -358,7 +418,7 @@ static bool started_after(struct deadline_data *dd, struct request *rq,
 
 /*
  * deadline_dispatch_requests selects the best request according to
- * read/write expire, fifo_batch, etc and with a start time <= @latest.
+ * read/write expire, fifo_batch, etc and with a start time <= @latest_start.
  */
 static struct request *__dd_dispatch_request(struct deadline_data *dd,
 					     struct dd_per_prio *per_prio,
@@ -541,12 +601,12 @@ unlock:
  * Called by __blk_mq_alloc_request(). The shallow_depth value set by this
  * function is used by __blk_mq_get_tag().
  */
-static void dd_limit_depth(unsigned int op, struct blk_mq_alloc_data *data)
+static void dd_limit_depth(blk_opf_t opf, struct blk_mq_alloc_data *data)
 {
 	struct deadline_data *dd = data->q->elevator->elevator_data;
 
 	/* Do not throttle synchronous reads. */
-	if (op_is_sync(op) && !op_is_write(op))
+	if (op_is_sync(opf) && !op_is_write(opf))
 		return;
 
 	/*
@@ -565,7 +625,7 @@ static void dd_depth_updated(struct blk_mq_hw_ctx *hctx)
 
 	dd->async_depth = max(1UL, 3 * q->nr_requests / 4);
 
-	sbitmap_queue_min_shallow_depth(tags->bitmap_tags, dd->async_depth);
+	sbitmap_queue_min_shallow_depth(&tags->bitmap_tags, dd->async_depth);
 }
 
 /* Called by blk_mq_init_hctx() and blk_mq_init_sched(). */
@@ -639,6 +699,9 @@ static int dd_init_sched(struct request_queue *q, struct elevator_type *e)
 	dd->prio_aging_expire = prio_aging_expire;
 	spin_lock_init(&dd->lock);
 	spin_lock_init(&dd->zone_lock);
+
+	/* We dispatch from request queue wide instead of hw queue */
+	blk_queue_flag_set(QUEUE_FLAG_SQ_SCHED, q);
 
 	q->elevator = eq;
 	return 0;
@@ -714,6 +777,7 @@ static void dd_insert_request(struct blk_mq_hw_ctx *hctx, struct request *rq,
 	u8 ioprio_class = IOPRIO_PRIO_CLASS(ioprio);
 	struct dd_per_prio *per_prio;
 	enum dd_prio prio;
+	LIST_HEAD(free);
 
 	lockdep_assert_held(&dd->lock);
 
@@ -730,10 +794,12 @@ static void dd_insert_request(struct blk_mq_hw_ctx *hctx, struct request *rq,
 		rq->elv.priv[0] = (void *)(uintptr_t)1;
 	}
 
-	if (blk_mq_sched_try_insert_merge(q, rq))
+	if (blk_mq_sched_try_insert_merge(q, rq, &free)) {
+		blk_mq_free_requests(&free);
 		return;
+	}
 
-	blk_mq_sched_request_inserted(rq);
+	trace_block_rq_insert(rq);
 
 	if (at_head) {
 		list_add(&rq->queuelist, &per_prio->dispatch);

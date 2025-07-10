@@ -60,7 +60,7 @@ struct shmid_kernel /* private to the kernel */
 	time64_t		shm_ctim;
 	struct pid		*shm_cprid;
 	struct pid		*shm_lprid;
-	struct user_struct	*mlock_user;
+	struct ucounts		*mlock_ucounts;
 
 	/*
 	 * The task created the shm object, for
@@ -232,7 +232,7 @@ static void shm_rcu_free(struct rcu_head *head)
 	struct shmid_kernel *shp = container_of(ptr, struct shmid_kernel,
 							shm_perm);
 	security_shm_free(&shp->shm_perm);
-	kvfree(shp);
+	kfree(shp);
 }
 
 /*
@@ -275,10 +275,8 @@ static inline void shm_rmid(struct shmid_kernel *s)
 }
 
 
-static int __shm_open(struct vm_area_struct *vma)
+static int __shm_open(struct shm_file_data *sfd)
 {
-	struct file *file = vma->vm_file;
-	struct shm_file_data *sfd = shm_file_data(file);
 	struct shmid_kernel *shp;
 
 	shp = shm_lock(sfd->ns, sfd->id);
@@ -302,7 +300,15 @@ static int __shm_open(struct vm_area_struct *vma)
 /* This is called by fork, once for every shm attach. */
 static void shm_open(struct vm_area_struct *vma)
 {
-	int err = __shm_open(vma);
+	struct file *file = vma->vm_file;
+	struct shm_file_data *sfd = shm_file_data(file);
+	int err;
+
+	/* Always call underlying open if present */
+	if (sfd->vm_ops->open)
+		sfd->vm_ops->open(vma);
+
+	err = __shm_open(sfd);
 	/*
 	 * We raced in the idr lookup or with shm_destroy().
 	 * Either way, the ID is busted.
@@ -329,10 +335,7 @@ static void shm_destroy(struct ipc_namespace *ns, struct shmid_kernel *shp)
 	shm_rmid(shp);
 	shm_unlock(shp);
 	if (!is_file_hugepages(shm_file))
-		shmem_lock(shm_file, 0, shp->mlock_user);
-	else if (shp->mlock_user)
-		user_shm_unlock(i_size_read(file_inode(shm_file)),
-				shp->mlock_user);
+		shmem_lock(shm_file, 0, shp->mlock_ucounts);
 	fput(shm_file);
 	ipc_update_pid(&shp->shm_cprid, NULL);
 	ipc_update_pid(&shp->shm_lprid, NULL);
@@ -362,10 +365,8 @@ static bool shm_may_destroy(struct shmid_kernel *shp)
  * The descriptor has already been removed from the current->mm->mmap list
  * and will later be kfree()d.
  */
-static void shm_close(struct vm_area_struct *vma)
+static void __shm_close(struct shm_file_data *sfd)
 {
-	struct file *file = vma->vm_file;
-	struct shm_file_data *sfd = shm_file_data(file);
 	struct shmid_kernel *shp;
 	struct ipc_namespace *ns = sfd->ns;
 
@@ -389,6 +390,18 @@ static void shm_close(struct vm_area_struct *vma)
 		shm_unlock(shp);
 done:
 	up_write(&shm_ids(ns).rwsem);
+}
+
+static void shm_close(struct vm_area_struct *vma)
+{
+	struct file *file = vma->vm_file;
+	struct shm_file_data *sfd = shm_file_data(file);
+
+	/* Always call underlying close if present */
+	if (sfd->vm_ops->close)
+		sfd->vm_ops->close(vma);
+
+	__shm_close(sfd);
 }
 
 /* Called with ns->shm_ids(ns).rwsem locked */
@@ -526,13 +539,13 @@ static vm_fault_t shm_fault(struct vm_fault *vmf)
 	return sfd->vm_ops->fault(vmf);
 }
 
-static int shm_split(struct vm_area_struct *vma, unsigned long addr)
+static int shm_may_split(struct vm_area_struct *vma, unsigned long addr)
 {
 	struct file *file = vma->vm_file;
 	struct shm_file_data *sfd = shm_file_data(file);
 
-	if (sfd->vm_ops->split)
-		return sfd->vm_ops->split(vma, addr);
+	if (sfd->vm_ops->may_split)
+		return sfd->vm_ops->may_split(vma, addr);
 
 	return 0;
 }
@@ -586,13 +599,13 @@ static int shm_mmap(struct file *file, struct vm_area_struct *vma)
 	 * IPC ID that was removed, and possibly even reused by another shm
 	 * segment already.  Propagate this case as an error to caller.
 	 */
-	ret = __shm_open(vma);
+	ret = __shm_open(sfd);
 	if (ret)
 		return ret;
 
 	ret = call_mmap(sfd->file, vma);
 	if (ret) {
-		shm_close(vma);
+		__shm_close(sfd);
 		return ret;
 	}
 	sfd->vm_ops = vma->vm_ops;
@@ -674,7 +687,7 @@ static const struct vm_operations_struct shm_vm_ops = {
 	.open	= shm_open,	/* callback for a new vm-area open */
 	.close	= shm_close,	/* callback for when the vm-area is released */
 	.fault	= shm_fault,
-	.split	= shm_split,
+	.may_split = shm_may_split,
 	.pagesize = shm_pagesize,
 #if defined(CONFIG_NUMA)
 	.set_policy = shm_set_policy,
@@ -711,18 +724,18 @@ static int newseg(struct ipc_namespace *ns, struct ipc_params *params)
 			ns->shm_tot + numpages > ns->shm_ctlall)
 		return -ENOSPC;
 
-	shp = kvmalloc(sizeof(*shp), GFP_KERNEL_ACCOUNT);
+	shp = kmalloc(sizeof(*shp), GFP_KERNEL_ACCOUNT);
 	if (unlikely(!shp))
 		return -ENOMEM;
 
 	shp->shm_perm.key = key;
 	shp->shm_perm.mode = (shmflg & S_IRWXUGO);
-	shp->mlock_user = NULL;
+	shp->mlock_ucounts = NULL;
 
 	shp->shm_perm.security = NULL;
 	error = security_shm_alloc(&shp->shm_perm);
 	if (error) {
-		kvfree(shp);
+		kfree(shp);
 		return error;
 	}
 
@@ -742,8 +755,7 @@ static int newseg(struct ipc_namespace *ns, struct ipc_params *params)
 		if (shmflg & SHM_NORESERVE)
 			acctflag = VM_NORESERVE;
 		file = hugetlb_file_setup(name, hugesize, acctflag,
-				  &shp->mlock_user, HUGETLB_SHMFS_INODE,
-				(shmflg >> SHM_HUGE_SHIFT) & SHM_HUGE_MASK);
+				HUGETLB_SHMFS_INODE, (shmflg >> SHM_HUGE_SHIFT) & SHM_HUGE_MASK);
 	} else {
 		/*
 		 * Do not allow no accounting for OVERCOMMIT_NEVER, even
@@ -794,8 +806,6 @@ static int newseg(struct ipc_namespace *ns, struct ipc_params *params)
 no_id:
 	ipc_update_pid(&shp->shm_cprid, NULL);
 	ipc_update_pid(&shp->shm_lprid, NULL);
-	if (is_file_hugepages(file) && shp->mlock_user)
-		user_shm_unlock(size, shp->mlock_user);
 	fput(file);
 	ipc_rcu_putref(&shp->shm_perm, shm_rcu_free);
 	return error;
@@ -1201,12 +1211,12 @@ static int shmctl_do_lock(struct ipc_namespace *ns, int shmid, int cmd)
 		goto out_unlock0;
 
 	if (cmd == SHM_LOCK) {
-		struct user_struct *user = current_user();
+		struct ucounts *ucounts = current_ucounts();
 
-		err = shmem_lock(shm_file, 1, user);
+		err = shmem_lock(shm_file, 1, ucounts);
 		if (!err && !(shp->shm_perm.mode & SHM_LOCKED)) {
 			shp->shm_perm.mode |= SHM_LOCKED;
-			shp->mlock_user = user;
+			shp->mlock_ucounts = ucounts;
 		}
 		goto out_unlock0;
 	}
@@ -1214,9 +1224,9 @@ static int shmctl_do_lock(struct ipc_namespace *ns, int shmid, int cmd)
 	/* SHM_UNLOCK */
 	if (!(shp->shm_perm.mode & SHM_LOCKED))
 		goto out_unlock0;
-	shmem_lock(shm_file, 0, shp->mlock_user);
+	shmem_lock(shm_file, 0, shp->mlock_ucounts);
 	shp->shm_perm.mode &= ~SHM_LOCKED;
-	shp->mlock_user = NULL;
+	shp->mlock_ucounts = NULL;
 	get_file(shm_file);
 	ipc_unlock_object(&shp->shm_perm);
 	rcu_read_unlock();
@@ -1727,7 +1737,7 @@ long ksys_shmdt(char __user *shmaddr)
 #ifdef CONFIG_MMU
 	loff_t size = 0;
 	struct file *file;
-	struct vm_area_struct *next;
+	VMA_ITERATOR(vmi, mm, addr);
 #endif
 
 	if (addr & ~PAGE_MASK)
@@ -1757,12 +1767,9 @@ long ksys_shmdt(char __user *shmaddr)
 	 * match the usual checks anyway. So assume all vma's are
 	 * above the starting address given.
 	 */
-	vma = find_vma(mm, addr);
 
 #ifdef CONFIG_MMU
-	while (vma) {
-		next = vma->vm_next;
-
+	for_each_vma(vmi, vma) {
 		/*
 		 * Check if the starting address would match, i.e. it's
 		 * a fragment created by mprotect() and/or munmap(), or it
@@ -1780,6 +1787,7 @@ long ksys_shmdt(char __user *shmaddr)
 			file = vma->vm_file;
 			size = i_size_read(file_inode(vma->vm_file));
 			do_munmap(mm, vma->vm_start, vma->vm_end - vma->vm_start, NULL);
+			mas_pause(&vmi.mas);
 			/*
 			 * We discovered the size of the shm segment, so
 			 * break out of here and fall through to the next
@@ -1787,10 +1795,9 @@ long ksys_shmdt(char __user *shmaddr)
 			 * searching for matching vma's.
 			 */
 			retval = 0;
-			vma = next;
+			vma = vma_next(&vmi);
 			break;
 		}
-		vma = next;
 	}
 
 	/*
@@ -1800,17 +1807,19 @@ long ksys_shmdt(char __user *shmaddr)
 	 */
 	size = PAGE_ALIGN(size);
 	while (vma && (loff_t)(vma->vm_end - addr) <= size) {
-		next = vma->vm_next;
-
 		/* finding a matching vma now does not alter retval */
 		if ((vma->vm_ops == &shm_vm_ops) &&
 		    ((vma->vm_start - addr)/PAGE_SIZE == vma->vm_pgoff) &&
-		    (vma->vm_file == file))
+		    (vma->vm_file == file)) {
 			do_munmap(mm, vma->vm_start, vma->vm_end - vma->vm_start, NULL);
-		vma = next;
+			mas_pause(&vmi.mas);
+		}
+
+		vma = vma_next(&vmi);
 	}
 
 #else	/* CONFIG_MMU */
+	vma = vma_lookup(mm, addr);
 	/* under NOMMU conditions, the exact address to be destroyed must be
 	 * given
 	 */

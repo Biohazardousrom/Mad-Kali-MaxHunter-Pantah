@@ -220,10 +220,10 @@ EXPORT_SYMBOL_GPL(teo_cpu_set_util_threshold);
  * @cpu: Target CPU
  * @cpu_data: Governor CPU data for the target CPU
  */
-#if defined(CONFIG_SMP) && defined(CONFIG_CPU_FREQ_GOV_SCHEDUTIL)
+#ifdef CONFIG_SMP
 static bool teo_cpu_is_utilized(int cpu, struct teo_cpu *cpu_data)
 {
-	return sched_cpu_util(cpu, arch_scale_cpu_capacity(cpu)) > cpu_data->util_threshold;
+	return sched_cpu_util(cpu) > cpu_data->util_threshold;
 }
 #else
 static bool teo_cpu_is_utilized(int cpu, struct teo_cpu *cpu_data)

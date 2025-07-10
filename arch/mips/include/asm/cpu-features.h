@@ -117,13 +117,8 @@
 #ifndef cpu_has_3k_cache
 #define cpu_has_3k_cache	__isa_lt_and_opt(1, MIPS_CPU_3K_CACHE)
 #endif
-#define cpu_has_6k_cache	0
-#define cpu_has_8k_cache	0
 #ifndef cpu_has_4k_cache
 #define cpu_has_4k_cache	__isa_ge_or_opt(1, MIPS_CPU_4K_CACHE)
-#endif
-#ifndef cpu_has_tx39_cache
-#define cpu_has_tx39_cache	__opt(MIPS_CPU_TX39_CACHE)
 #endif
 #ifndef cpu_has_octeon_cache
 #define cpu_has_octeon_cache						\
@@ -155,6 +150,9 @@
 #  define raw_cpu_has_fpu	0
 # endif
 #else
+# if cpu_has_fpu
+#  error "Forcing `cpu_has_fpu' to non-zero is not supported"
+# endif
 # define raw_cpu_has_fpu	cpu_has_fpu
 #endif
 #ifndef cpu_has_32fpr

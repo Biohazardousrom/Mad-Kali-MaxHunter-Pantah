@@ -43,6 +43,7 @@
 #include <linux/err.h>
 #include <linux/fs.h>
 #include <linux/list.h>
+#include <linux/mem_relinquish.h>
 
 /*
  * Balloon device information descriptor.
@@ -57,7 +58,6 @@ struct balloon_dev_info {
 	struct list_head pages;		/* Pages enqueued & handled to Host */
 	int (*migratepage)(struct balloon_dev_info *, struct page *newpage,
 			struct page *page, enum migrate_mode mode);
-	struct inode *inode;
 };
 
 extern struct page *balloon_page_alloc(void);
@@ -75,17 +75,10 @@ static inline void balloon_devinfo_init(struct balloon_dev_info *balloon)
 	spin_lock_init(&balloon->pages_lock);
 	INIT_LIST_HEAD(&balloon->pages);
 	balloon->migratepage = NULL;
-	balloon->inode = NULL;
 }
 
 #ifdef CONFIG_BALLOON_COMPACTION
-extern const struct address_space_operations balloon_aops;
-extern bool balloon_page_isolate(struct page *page,
-				isolate_mode_t mode);
-extern void balloon_page_putback(struct page *page);
-extern int balloon_page_migrate(struct address_space *mapping,
-				struct page *newpage,
-				struct page *page, enum migrate_mode mode);
+extern const struct movable_operations balloon_mops;
 
 /*
  * balloon_page_insert - insert a page into the balloon's page list and make
@@ -100,9 +93,10 @@ static inline void balloon_page_insert(struct balloon_dev_info *balloon,
 				       struct page *page)
 {
 	__SetPageOffline(page);
-	__SetPageMovable(page, balloon->inode->i_mapping);
+	__SetPageMovable(page, &balloon_mops);
 	set_page_private(page, (unsigned long)balloon);
 	list_add(&page->lru, &balloon->pages);
+	page_relinquish(page);
 }
 
 /*
@@ -147,28 +141,13 @@ static inline void balloon_page_insert(struct balloon_dev_info *balloon,
 {
 	__SetPageOffline(page);
 	list_add(&page->lru, &balloon->pages);
+	page_relinquish(page);
 }
 
 static inline void balloon_page_delete(struct page *page)
 {
 	__ClearPageOffline(page);
 	list_del(&page->lru);
-}
-
-static inline bool balloon_page_isolate(struct page *page)
-{
-	return false;
-}
-
-static inline void balloon_page_putback(struct page *page)
-{
-	return;
-}
-
-static inline int balloon_page_migrate(struct page *newpage,
-				struct page *page, enum migrate_mode mode)
-{
-	return 0;
 }
 
 static inline gfp_t balloon_mapping_gfp_mask(void)

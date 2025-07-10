@@ -8,17 +8,41 @@
  * Copyright (C) 2011 Google, Inc.
  */
 
-#include <linux/freezer.h>
+#include "page_pool.h"
+
 #include <linux/list.h>
-#include <linux/slab.h>
+#include <linux/shrinker.h>
 #include <linux/spinlock.h>
 #include <linux/swap.h>
 #include <linux/sched/signal.h>
-#include "page_pool.h"
 
-struct dmabuf_page_pool_with_spinlock {
-	struct dmabuf_page_pool pool;
-	struct spinlock spinlock;
+/* page types we track in the pool */
+enum {
+	POOL_LOWPAGE,      /* Clean lowmem pages */
+	POOL_HIGHPAGE,     /* Clean highmem pages */
+
+	POOL_TYPE_SIZE,
+};
+
+/**
+ * struct dmabuf_page_pool - pagepool struct
+ * @count[]:		array of number of pages of that type in the pool
+ * @items[]:		array of list of pages of the specific type
+ * @lock:		lock protecting this struct and especially the count
+ *			item list
+ * @gfp_mask:		gfp_mask to use from alloc
+ * @order:		order of pages in the pool
+ * @list:		list node for list of pools
+ *
+ * Allows you to keep a pool of pre allocated pages to use
+ */
+struct dmabuf_page_pool {
+	int count[POOL_TYPE_SIZE];
+	struct list_head items[POOL_TYPE_SIZE];
+	spinlock_t lock;
+	gfp_t gfp_mask;
+	unsigned int order;
+	struct list_head list;
 };
 
 static LIST_HEAD(pool_list);
@@ -41,18 +65,16 @@ static inline void dmabuf_page_pool_free_pages(struct dmabuf_page_pool *pool,
 static void dmabuf_page_pool_add(struct dmabuf_page_pool *pool, struct page *page)
 {
 	int index;
-	struct dmabuf_page_pool_with_spinlock *container_pool =
-		container_of(pool, struct dmabuf_page_pool_with_spinlock, pool);
 
 	if (PageHighMem(page))
 		index = POOL_HIGHPAGE;
 	else
 		index = POOL_LOWPAGE;
 
-	spin_lock(&container_pool->spinlock);
+	spin_lock(&pool->lock);
 	list_add_tail(&page->lru, &pool->items[index]);
 	pool->count[index]++;
-	spin_unlock(&container_pool->spinlock);
+	spin_unlock(&pool->lock);
 	mod_node_page_state(page_pgdat(page), NR_KERNEL_MISC_RECLAIMABLE,
 			    1 << pool->order);
 }
@@ -60,21 +82,18 @@ static void dmabuf_page_pool_add(struct dmabuf_page_pool *pool, struct page *pag
 static struct page *dmabuf_page_pool_remove(struct dmabuf_page_pool *pool, int index)
 {
 	struct page *page;
-	struct dmabuf_page_pool_with_spinlock *container_pool =
-		container_of(pool, struct dmabuf_page_pool_with_spinlock, pool);
 
-	spin_lock(&container_pool->spinlock);
+	spin_lock(&pool->lock);
 	page = list_first_entry_or_null(&pool->items[index], struct page, lru);
 	if (page) {
 		pool->count[index]--;
 		list_del(&page->lru);
-		spin_unlock(&container_pool->spinlock);
+		spin_unlock(&pool->lock);
 		mod_node_page_state(page_pgdat(page), NR_KERNEL_MISC_RECLAIMABLE,
 				    -(1 << pool->order));
 		goto out;
 	}
-	spin_unlock(&container_pool->spinlock);
-
+	spin_unlock(&pool->lock);
 out:
 	return page;
 }
@@ -126,16 +145,11 @@ static int dmabuf_page_pool_total(struct dmabuf_page_pool *pool, bool high)
 
 struct dmabuf_page_pool *dmabuf_page_pool_create(gfp_t gfp_mask, unsigned int order)
 {
-	struct dmabuf_page_pool *pool;
-	struct dmabuf_page_pool_with_spinlock *container_pool =
-		kmalloc(sizeof(*container_pool), GFP_KERNEL);
+	struct dmabuf_page_pool *pool = kmalloc(sizeof(*pool), GFP_KERNEL);
 	int i;
 
-	if (!container_pool)
+	if (!pool)
 		return NULL;
-
-	spin_lock_init(&container_pool->spinlock);
-	pool = &container_pool->pool;
 
 	for (i = 0; i < POOL_TYPE_SIZE; i++) {
 		pool->count[i] = 0;
@@ -143,7 +157,7 @@ struct dmabuf_page_pool *dmabuf_page_pool_create(gfp_t gfp_mask, unsigned int or
 	}
 	pool->gfp_mask = gfp_mask | __GFP_COMP;
 	pool->order = order;
-	mutex_init(&pool->mutex); /* No longer used! */
+	spin_lock_init(&pool->lock);
 
 	mutex_lock(&pool_list_lock);
 	list_add(&pool->list, &pool_list);
@@ -156,7 +170,6 @@ EXPORT_SYMBOL_GPL(dmabuf_page_pool_create);
 void dmabuf_page_pool_destroy(struct dmabuf_page_pool *pool)
 {
 	struct page *page;
-	struct dmabuf_page_pool_with_spinlock *container_pool;
 	int i;
 
 	/* Remove us from the pool list */
@@ -170,10 +183,24 @@ void dmabuf_page_pool_destroy(struct dmabuf_page_pool *pool)
 			dmabuf_page_pool_free_pages(pool, page);
 	}
 
-	container_pool = container_of(pool, struct dmabuf_page_pool_with_spinlock, pool);
-	kfree(container_pool);
+	kfree(pool);
 }
 EXPORT_SYMBOL_GPL(dmabuf_page_pool_destroy);
+
+unsigned long dmabuf_page_pool_get_size(struct dmabuf_page_pool *pool)
+{
+       int i;
+       unsigned long num_pages = 0;
+
+       spin_lock(&pool->lock);
+       for (i = 0; i < POOL_TYPE_SIZE; ++i)
+               num_pages += pool->count[i];
+       spin_unlock(&pool->lock);
+       num_pages <<= pool->order; /* pool order is immutable */
+
+       return num_pages * PAGE_SIZE;
+}
+EXPORT_SYMBOL_GPL(dmabuf_page_pool_get_size);
 
 static int dmabuf_page_pool_do_shrink(struct dmabuf_page_pool *pool, gfp_t gfp_mask,
 				      int nr_to_scan)
@@ -261,7 +288,7 @@ struct shrinker pool_shrinker = {
 
 static int dmabuf_page_pool_init_shrinker(void)
 {
-	return register_shrinker(&pool_shrinker);
+	return register_shrinker(&pool_shrinker, "dmabuf-page-pool-shrinker");
 }
 module_init(dmabuf_page_pool_init_shrinker);
 MODULE_LICENSE("GPL v2");

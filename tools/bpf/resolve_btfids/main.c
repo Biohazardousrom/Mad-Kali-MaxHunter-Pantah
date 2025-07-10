@@ -45,6 +45,19 @@
  *             .zero 4
  *             __BTF_ID__func__vfs_fallocate__4:
  *             .zero 4
+ *
+ *   set8    - store symbol size into first 4 bytes and sort following
+ *             ID list
+ *
+ *             __BTF_ID__set8__list:
+ *             .zero 8
+ *             list:
+ *             __BTF_ID__func__vfs_getattr__3:
+ *             .zero 4
+ *	       .word (1 << 0) | (1 << 2)
+ *             __BTF_ID__func__vfs_fallocate__5:
+ *             .zero 4
+ *	       .word (1 << 3) | (1 << 1) | (1 << 2)
  */
 
 #define  _GNU_SOURCE
@@ -57,23 +70,33 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <linux/btf_ids.h>
 #include <linux/rbtree.h>
 #include <linux/zalloc.h>
 #include <linux/err.h>
-#include <btf.h>
-#include <libbpf.h>
-#include <parse-options.h>
+#include <bpf/btf.h>
+#include <bpf/libbpf.h>
+#include <subcmd/parse-options.h>
 
 #define BTF_IDS_SECTION	".BTF_ids"
-#define BTF_ID		"__BTF_ID__"
+#define BTF_ID_PREFIX	"__BTF_ID__"
 
 #define BTF_STRUCT	"struct"
 #define BTF_UNION	"union"
 #define BTF_TYPEDEF	"typedef"
 #define BTF_FUNC	"func"
 #define BTF_SET		"set"
+#define BTF_SET8	"set8"
 
 #define ADDR_CNT	100
+
+#if __BYTE_ORDER == __LITTLE_ENDIAN
+# define ELFDATANATIVE	ELFDATA2LSB
+#elif __BYTE_ORDER == __BIG_ENDIAN
+# define ELFDATANATIVE	ELFDATA2MSB
+#else
+# error "Unknown machine endianness!"
+#endif
 
 struct btf_id {
 	struct rb_node	 rb_node;
@@ -83,12 +106,15 @@ struct btf_id {
 		int	 cnt;
 	};
 	int		 addr_cnt;
+	bool		 is_set;
+	bool		 is_set8;
 	Elf64_Addr	 addr[ADDR_CNT];
 };
 
 struct object {
 	const char *path;
 	const char *btf;
+	const char *base_btf_path;
 
 	struct {
 		int		 fd;
@@ -99,6 +125,7 @@ struct object {
 		int		 idlist_shndx;
 		size_t		 strtabidx;
 		unsigned long	 idlist_addr;
+		int		 encoding;
 	} efile;
 
 	struct rb_root	sets;
@@ -139,10 +166,12 @@ static int eprintf(int level, int var, const char *fmt, ...)
 #define pr_debug2(fmt, ...) pr_debugN(2, pr_fmt(fmt), ##__VA_ARGS__)
 #define pr_err(fmt, ...) \
 	eprintf(0, verbose, pr_fmt(fmt), ##__VA_ARGS__)
+#define pr_info(fmt, ...) \
+	eprintf(0, verbose, pr_fmt(fmt), ##__VA_ARGS__)
 
 static bool is_btf_id(const char *name)
 {
-	return name && !strncmp(name, BTF_ID, sizeof(BTF_ID) - 1);
+	return name && !strncmp(name, BTF_ID_PREFIX, sizeof(BTF_ID_PREFIX) - 1);
 }
 
 static struct btf_id *btf_id__find(struct rb_root *root, const char *name)
@@ -164,7 +193,7 @@ static struct btf_id *btf_id__find(struct rb_root *root, const char *name)
 	return NULL;
 }
 
-static struct btf_id*
+static struct btf_id *
 btf_id__add(struct rb_root *root, char *name, bool unique)
 {
 	struct rb_node **p = &root->rb_node;
@@ -227,14 +256,14 @@ static char *get_id(const char *prefix_end)
 	return id;
 }
 
-static struct btf_id *add_set(struct object *obj, char *name)
+static struct btf_id *add_set(struct object *obj, char *name, bool is_set8)
 {
 	/*
 	 * __BTF_ID__set__name
 	 * name =    ^
 	 * id   =         ^
 	 */
-	char *id = name + sizeof(BTF_SET "__") - 1;
+	char *id = name + (is_set8 ? sizeof(BTF_SET8 "__") : sizeof(BTF_SET "__")) - 1;
 	int len = strlen(name);
 
 	if (id >= name + len) {
@@ -289,7 +318,7 @@ static int compressed_section_fix(Elf *elf, Elf_Scn *scn, GElf_Shdr *sh)
 	sh->sh_addralign = expected;
 
 	if (gelf_update_shdr(scn, sh) == 0) {
-		printf("FAILED cannot update section header: %s\n",
+		pr_err("FAILED cannot update section header: %s\n",
 			elf_errmsg(-1));
 		return -1;
 	}
@@ -300,6 +329,7 @@ static int elf_collect(struct object *obj)
 {
 	Elf_Scn *scn = NULL;
 	size_t shdrstrndx;
+	GElf_Ehdr ehdr;
 	int idx = 0;
 	Elf *elf;
 	int fd;
@@ -315,6 +345,7 @@ static int elf_collect(struct object *obj)
 
 	elf = elf_begin(fd, ELF_C_RDWR_MMAP, NULL);
 	if (!elf) {
+		close(fd);
 		pr_err("FAILED cannot create ELF descriptor: %s\n",
 			elf_errmsg(-1));
 		return -1;
@@ -329,6 +360,13 @@ static int elf_collect(struct object *obj)
 		pr_err("FAILED cannot get shdr str ndx\n");
 		return -1;
 	}
+
+	if (gelf_getehdr(obj->efile.elf, &ehdr) == NULL) {
+		pr_err("FAILED cannot get ELF header: %s\n",
+			elf_errmsg(-1));
+		return -1;
+	}
+	obj->efile.encoding = ehdr.e_ident[EI_DATA];
 
 	/*
 	 * Scan all the elf sections and look for save data
@@ -421,7 +459,7 @@ static int symbols_collect(struct object *obj)
 		 * __BTF_ID__TYPE__vfs_truncate__0
 		 * prefix =  ^
 		 */
-		prefix = name + sizeof(BTF_ID) - 1;
+		prefix = name + sizeof(BTF_ID_PREFIX) - 1;
 
 		/* struct */
 		if (!strncmp(prefix, BTF_STRUCT, sizeof(BTF_STRUCT) - 1)) {
@@ -439,16 +477,30 @@ static int symbols_collect(struct object *obj)
 		} else if (!strncmp(prefix, BTF_FUNC, sizeof(BTF_FUNC) - 1)) {
 			obj->nr_funcs++;
 			id = add_symbol(&obj->funcs, prefix, sizeof(BTF_FUNC) - 1);
+		/* set8 */
+		} else if (!strncmp(prefix, BTF_SET8, sizeof(BTF_SET8) - 1)) {
+			id = add_set(obj, prefix, true);
+			/*
+			 * SET8 objects store list's count, which is encoded
+			 * in symbol's size, together with 'cnt' field hence
+			 * that - 1.
+			 */
+			if (id) {
+				id->cnt = sym.st_size / sizeof(uint64_t) - 1;
+				id->is_set8 = true;
+			}
 		/* set */
 		} else if (!strncmp(prefix, BTF_SET, sizeof(BTF_SET) - 1)) {
-			id = add_set(obj, prefix);
+			id = add_set(obj, prefix, false);
 			/*
 			 * SET objects store list's count, which is encoded
 			 * in symbol's size, together with 'cnt' field hence
 			 * that - 1.
 			 */
-			if (id)
+			if (id) {
 				id->cnt = sym.st_size / sizeof(int) - 1;
+				id->is_set = true;
+			}
 		} else {
 			pr_err("FAILED unsupported prefix %s\n", prefix);
 			return -1;
@@ -458,7 +510,7 @@ static int symbols_collect(struct object *obj)
 			return -ENOMEM;
 
 		if (id->addr_cnt >= ADDR_CNT) {
-			pr_err("FAILED symbol %s crossed the number of allowed lists",
+			pr_err("FAILED symbol %s crossed the number of allowed lists\n",
 				id->name);
 			return -1;
 		}
@@ -474,25 +526,36 @@ static int symbols_resolve(struct object *obj)
 	int nr_structs  = obj->nr_structs;
 	int nr_unions   = obj->nr_unions;
 	int nr_funcs    = obj->nr_funcs;
+	struct btf *base_btf = NULL;
 	int err, type_id;
 	struct btf *btf;
-	__u32 nr;
+	__u32 nr_types;
 
-	btf = btf__parse(obj->btf ?: obj->path, NULL);
+	if (obj->base_btf_path) {
+		base_btf = btf__parse(obj->base_btf_path, NULL);
+		err = libbpf_get_error(base_btf);
+		if (err) {
+			pr_err("FAILED: load base BTF from %s: %s\n",
+			       obj->base_btf_path, strerror(-err));
+			return -1;
+		}
+	}
+
+	btf = btf__parse_split(obj->btf ?: obj->path, base_btf);
 	err = libbpf_get_error(btf);
 	if (err) {
-		pr_err("FAILED: load BTF from %s: %s",
-			obj->path, strerror(err));
-		return -1;
+		pr_err("FAILED: load BTF from %s: %s\n",
+			obj->btf ?: obj->path, strerror(-err));
+		goto out;
 	}
 
 	err = -1;
-	nr  = btf__get_nr_types(btf);
+	nr_types = btf__type_cnt(btf);
 
 	/*
 	 * Iterate all the BTF types and search for collected symbol IDs.
 	 */
-	for (type_id = 1; type_id <= nr; type_id++) {
+	for (type_id = 1; type_id < nr_types; type_id++) {
 		const struct btf_type *type;
 		struct rb_root *root;
 		struct btf_id *id;
@@ -530,13 +593,19 @@ static int symbols_resolve(struct object *obj)
 
 		id = btf_id__find(root, str);
 		if (id) {
-			id->id = type_id;
-			(*nr)--;
+			if (id->id) {
+				pr_info("WARN: multiple IDs found for '%s': %d, %d - using %d\n",
+					str, id->id, type_id, id->id);
+			} else {
+				id->id = type_id;
+				(*nr)--;
+			}
 		}
 	}
 
 	err = 0;
 out:
+	btf__free(base_btf);
 	btf__free(btf);
 	return err;
 }
@@ -547,10 +616,9 @@ static int id_patch(struct object *obj, struct btf_id *id)
 	int *ptr = data->d_buf;
 	int i;
 
-	if (!id->id) {
-		pr_err("FAILED unresolved symbol %s\n", id->name);
-		return -EINVAL;
-	}
+	/* For set, set8, id->id may be 0 */
+	if (!id->id && !id->is_set && !id->is_set8)
+		pr_err("WARN: resolve_btfids: unresolved symbol %s\n", id->name);
 
 	for (i = 0; i < id->addr_cnt; i++) {
 		unsigned long addr = id->addr[i];
@@ -599,19 +667,18 @@ static int cmp_id(const void *pa, const void *pb)
 static int sets_patch(struct object *obj)
 {
 	Elf_Data *data = obj->efile.idlist;
-	int *ptr = data->d_buf;
 	struct rb_node *next;
 
 	next = rb_first(&obj->sets);
 	while (next) {
-		unsigned long addr, idx;
+		struct btf_id_set8 *set8;
+		struct btf_id_set *set;
+		unsigned long addr, off;
 		struct btf_id *id;
-		int *base;
-		int cnt;
 
 		id   = rb_entry(next, struct btf_id, rb_node);
 		addr = id->addr[0];
-		idx  = addr - obj->efile.idlist_addr;
+		off = addr - obj->efile.idlist_addr;
 
 		/* sets are unique */
 		if (id->addr_cnt != 1) {
@@ -620,14 +687,39 @@ static int sets_patch(struct object *obj)
 			return -1;
 		}
 
-		idx = idx / sizeof(int);
-		base = &ptr[idx] + 1;
-		cnt = ptr[idx];
+		if (id->is_set) {
+			set = data->d_buf + off;
+			qsort(set->ids, set->cnt, sizeof(set->ids[0]), cmp_id);
+		} else {
+			set8 = data->d_buf + off;
+			/*
+			 * Make sure id is at the beginning of the pairs
+			 * struct, otherwise the below qsort would not work.
+			 */
+			BUILD_BUG_ON(set8->pairs != &set8->pairs[0].id);
+			qsort(set8->pairs, set8->cnt, sizeof(set8->pairs[0]), cmp_id);
+
+			/*
+			 * When ELF endianness does not match endianness of the
+			 * host, libelf will do the translation when updating
+			 * the ELF. This, however, corrupts SET8 flags which are
+			 * already in the target endianness. So, let's bswap
+			 * them to the host endianness and libelf will then
+			 * correctly translate everything.
+			 */
+			if (obj->efile.encoding != ELFDATANATIVE) {
+				int i;
+
+				set8->flags = bswap_32(set8->flags);
+				for (i = 0; i < set8->cnt; i++) {
+					set8->pairs[i].flags =
+						bswap_32(set8->pairs[i].flags);
+				}
+			}
+		}
 
 		pr_debug("sorting  addr %5lu: cnt %6d [%s]\n",
-			 (idx + 1) * sizeof(int), cnt, id->name);
-
-		qsort(base, cnt, sizeof(int), cmp_id);
+			 off, id->is_set ? set->cnt : set8->cnt, id->name);
 
 		next = rb_next(next);
 	}
@@ -636,7 +728,7 @@ static int sets_patch(struct object *obj)
 
 static int symbols_patch(struct object *obj)
 {
-	int err;
+	off_t err;
 
 	if (__symbols_patch(obj, &obj->structs)  ||
 	    __symbols_patch(obj, &obj->unions)   ||
@@ -671,7 +763,6 @@ static const char * const resolve_btfids_usage[] = {
 
 int main(int argc, const char **argv)
 {
-	bool no_fail = false;
 	struct object obj = {
 		.efile = {
 			.idlist_shndx  = -1,
@@ -688,8 +779,8 @@ int main(int argc, const char **argv)
 			 "be more verbose (show errors, etc)"),
 		OPT_STRING(0, "btf", &obj.btf, "BTF data",
 			   "BTF data"),
-		OPT_BOOLEAN(0, "no-fail", &no_fail,
-			   "do not fail if " BTF_IDS_SECTION " section is not found"),
+		OPT_STRING('b', "btf_base", &obj.base_btf_path, "file",
+			   "path of file providing base BTF"),
 		OPT_END()
 	};
 	int err = -1;
@@ -710,10 +801,9 @@ int main(int argc, const char **argv)
 	 */
 	if (obj.efile.idlist_shndx == -1 ||
 	    obj.efile.symbols_shndx == -1) {
-		if (no_fail)
-			return 0;
-		pr_err("FAILED to find needed sections\n");
-		return -1;
+		pr_debug("Cannot find .BTF_ids or symbols sections, nothing to do\n");
+		err = 0;
+		goto out;
 	}
 
 	if (symbols_collect(&obj))
@@ -727,8 +817,9 @@ int main(int argc, const char **argv)
 
 	err = 0;
 out:
-	if (obj.efile.elf)
+	if (obj.efile.elf) {
 		elf_end(obj.efile.elf);
-	close(obj.efile.fd);
+		close(obj.efile.fd);
+	}
 	return err;
 }

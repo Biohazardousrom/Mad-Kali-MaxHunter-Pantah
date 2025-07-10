@@ -506,16 +506,11 @@ static int acx565akm_connect(struct omap_dss_device *dssdev)
 {
 	struct panel_drv_data *ddata = to_panel_data(dssdev);
 	struct omap_dss_device *in = ddata->in;
-	int r;
 
 	if (omapdss_device_is_connected(dssdev))
 		return 0;
 
-	r = in->ops.sdi->connect(in, dssdev);
-	if (r)
-		return r;
-
-	return 0;
+	return in->ops.sdi->connect(in, dssdev);
 }
 
 static void acx565akm_disconnect(struct omap_dss_device *dssdev)
@@ -862,7 +857,7 @@ err_gpio:
 	return r;
 }
 
-static int acx565akm_remove(struct spi_device *spi)
+static void acx565akm_remove(struct spi_device *spi)
 {
 	struct panel_drv_data *ddata = dev_get_drvdata(&spi->dev);
 	struct omap_dss_device *dssdev = &ddata->dssdev;
@@ -879,8 +874,6 @@ static int acx565akm_remove(struct spi_device *spi)
 	acx565akm_disconnect(dssdev);
 
 	omap_dss_put_device(in);
-
-	return 0;
 }
 
 static const struct of_device_id acx565akm_of_match[] = {

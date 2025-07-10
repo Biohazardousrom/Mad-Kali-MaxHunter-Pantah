@@ -805,11 +805,6 @@ static void vmci_transport_handle_detach(struct sock *sk)
 	struct vsock_sock *vsk;
 
 	vsk = vsock_sk(sk);
-
-	/* Only handle our own sockets */
-	if (vsk->transport != &vmci_transport)
-		return;
-
 	if (!vmci_handle_is_invalid(vmci_trans(vsk)->qp_handle)) {
 		sock_set_flag(sk, SOCK_DONE);
 
@@ -838,7 +833,7 @@ static void vmci_transport_handle_detach(struct sock *sk)
 
 				sk->sk_state = TCP_CLOSE;
 				sk->sk_err = ECONNRESET;
-				sk->sk_error_report(sk);
+				sk_error_report(sk);
 				return;
 			}
 			sk->sk_state = TCP_CLOSE;
@@ -889,7 +884,8 @@ static void vmci_transport_qp_resumed_cb(u32 sub_id,
 					 const struct vmci_event_data *e_data,
 					 void *client_data)
 {
-	vsock_for_each_connected_socket(vmci_transport_handle_detach);
+	vsock_for_each_connected_socket(&vmci_transport,
+					vmci_transport_handle_detach);
 }
 
 static void vmci_transport_recv_pkt_work(struct work_struct *work)
@@ -951,13 +947,11 @@ static int vmci_transport_recv_listen(struct sock *sk,
 	bool old_request = false;
 	bool old_pkt_proto = false;
 
-	err = 0;
-
 	/* Because we are in the listen state, we could be receiving a packet
 	 * for ourself or any previous connection requests that we received.
 	 * If it's the latter, we try to find a socket in our list of pending
 	 * connections and, if we do, call the appropriate handler for the
-	 * state that that socket is in.  Otherwise we try to service the
+	 * state that socket is in.  Otherwise we try to service the
 	 * connection request.
 	 */
 	pending = vmci_transport_get_pending(sk, pkt);
@@ -1257,7 +1251,7 @@ vmci_transport_recv_connecting_server(struct sock *listener,
 	vsock_remove_pending(listener, pending);
 	vsock_enqueue_accept(listener, pending);
 
-	/* Callers of accept() will be be waiting on the listening socket, not
+	/* Callers of accept() will be waiting on the listening socket, not
 	 * the pending socket.
 	 */
 	listener->sk_data_ready(listener);
@@ -1374,7 +1368,7 @@ destroy:
 
 	sk->sk_state = TCP_CLOSE;
 	sk->sk_err = skerr;
-	sk->sk_error_report(sk);
+	sk_error_report(sk);
 	return err;
 }
 
@@ -1742,19 +1736,16 @@ static int vmci_transport_dgram_dequeue(struct vsock_sock *vsk,
 					int flags)
 {
 	int err;
-	int noblock;
 	struct vmci_datagram *dg;
 	size_t payload_len;
 	struct sk_buff *skb;
-
-	noblock = flags & MSG_DONTWAIT;
 
 	if (flags & MSG_OOB || flags & MSG_ERRQUEUE)
 		return -EOPNOTSUPP;
 
 	/* Retrieve the head sk_buff from the socket's receive queue. */
 	err = 0;
-	skb = skb_recv_datagram(&vsk->sk, flags, noblock, &err);
+	skb = skb_recv_datagram(&vsk->sk, flags, &err);
 	if (!skb)
 		return err;
 

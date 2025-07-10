@@ -45,6 +45,7 @@ static int __report_module(struct addr_location *al, u64 ip,
 {
 	Dwfl_Module *mod;
 	struct dso *dso = NULL;
+	Dwarf_Addr base;
 	/*
 	 * Some callers will use al->sym, so we can't just use the
 	 * cheaper thread__find_map() here.
@@ -57,24 +58,36 @@ static int __report_module(struct addr_location *al, u64 ip,
 	if (!dso)
 		return 0;
 
+	/*
+	 * The generated JIT DSO files only map the code segment without
+	 * ELF headers.  Since JIT codes used to be packed in a memory
+	 * segment, calculating the base address using pgoff falls info
+	 * a different code in another DSO.  So just use the map->start
+	 * directly to pick the correct one.
+	 */
+	if (!strncmp(dso->long_name, "/tmp/jitted-", 12))
+		base = al->map->start;
+	else
+		base = al->map->start - al->map->pgoff;
+
 	mod = dwfl_addrmodule(ui->dwfl, ip);
 	if (mod) {
 		Dwarf_Addr s;
 
 		dwfl_module_info(mod, NULL, &s, NULL, NULL, NULL, NULL, NULL);
-		if (s != al->map->start - al->map->pgoff)
-			mod = 0;
+		if (s != base)
+			mod = NULL;
 	}
 
 	if (!mod)
 		mod = dwfl_report_elf(ui->dwfl, dso->short_name, dso->long_name, -1,
-				      al->map->start - al->map->pgoff, false);
+				      base, false);
 	if (!mod) {
 		char filename[PATH_MAX];
 
 		if (dso__build_id_filename(dso, filename, sizeof(filename), false))
 			mod = dwfl_report_elf(ui->dwfl, dso->short_name, filename, -1,
-					      al->map->start - al->map->pgoff, false);
+					      base, false);
 	}
 
 	if (mod) {
@@ -200,7 +213,8 @@ frame_callback(Dwfl_Frame *state, void *arg)
 	bool isactivation;
 
 	if (!dwfl_frame_pc(state, &pc, NULL)) {
-		pr_err("%s", dwfl_errmsg(-1));
+		if (!ui->best_effort)
+			pr_err("%s", dwfl_errmsg(-1));
 		return DWARF_CB_ABORT;
 	}
 
@@ -208,7 +222,8 @@ frame_callback(Dwfl_Frame *state, void *arg)
 	report_module(pc, ui);
 
 	if (!dwfl_frame_pc(state, &pc, &isactivation)) {
-		pr_err("%s", dwfl_errmsg(-1));
+		if (!ui->best_effort)
+			pr_err("%s", dwfl_errmsg(-1));
 		return DWARF_CB_ABORT;
 	}
 
@@ -222,7 +237,8 @@ frame_callback(Dwfl_Frame *state, void *arg)
 int unwind__get_entries(unwind_entry_cb_t cb, void *arg,
 			struct thread *thread,
 			struct perf_sample *data,
-			int max_stack)
+			int max_stack,
+			bool best_effort)
 {
 	struct unwind_info *ui, ui_buf = {
 		.sample		= data,
@@ -231,6 +247,7 @@ int unwind__get_entries(unwind_entry_cb_t cb, void *arg,
 		.cb		= cb,
 		.arg		= arg,
 		.max_stack	= max_stack,
+		.best_effort    = best_effort
 	};
 	Dwarf_Word ip;
 	int err = -EINVAL, i;

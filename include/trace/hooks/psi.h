@@ -9,9 +9,8 @@
 
 #include <trace/hooks/vendor_hooks.h>
 
-struct psi_group;
 struct psi_trigger;
-
+struct psi_group;
 DECLARE_HOOK(android_vh_psi_event,
 	TP_PROTO(struct psi_trigger *t),
 	TP_ARGS(t));

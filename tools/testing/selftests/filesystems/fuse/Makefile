@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0
-CFLAGS += -D_FILE_OFFSET_BITS=64 -Wall -Werror -I../.. -I../../../../..
+CFLAGS += -D_FILE_OFFSET_BITS=64 -Wall -Werror -I../.. -I../../../../.. -I../../../../include
 LDLIBS := -lpthread -lelf
 TEST_GEN_PROGS := fuse_test fuse_daemon
 TEST_GEN_FILES := \

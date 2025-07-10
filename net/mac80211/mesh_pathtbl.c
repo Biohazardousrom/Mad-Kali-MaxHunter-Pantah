@@ -117,7 +117,7 @@ static void prepare_for_gate(struct sk_buff *skb, char *dst_addr,
 		hdr = (struct ieee80211_hdr *) skb->data;
 
 		/* we preserve the previous mesh header and only add
-		 * the new addreses */
+		 * the new addresses */
 		mshdr = (struct ieee80211s_hdr *) (skb->data + hdrlen);
 		mshdr->flags = MESH_FLAGS_AE_A5_A6;
 		memcpy(mshdr->eaddr1, hdr->addr3, ETH_ALEN);
@@ -723,10 +723,23 @@ void mesh_path_discard_frame(struct ieee80211_sub_if_data *sdata,
  */
 void mesh_path_flush_pending(struct mesh_path *mpath)
 {
+	struct ieee80211_sub_if_data *sdata = mpath->sdata;
+	struct ieee80211_if_mesh *ifmsh = &sdata->u.mesh;
+	struct mesh_preq_queue *preq, *tmp;
 	struct sk_buff *skb;
 
 	while ((skb = skb_dequeue(&mpath->frame_queue)) != NULL)
 		mesh_path_discard_frame(mpath->sdata, skb);
+
+	spin_lock_bh(&ifmsh->mesh_preq_queue_lock);
+	list_for_each_entry_safe(preq, tmp, &ifmsh->preq_queue.list, list) {
+		if (ether_addr_equal(mpath->dst, preq->dst)) {
+			list_del(&preq->list);
+			kfree(preq);
+			--ifmsh->preq_queue_len;
+		}
+	}
+	spin_unlock_bh(&ifmsh->mesh_preq_queue_lock);
 }
 
 /**

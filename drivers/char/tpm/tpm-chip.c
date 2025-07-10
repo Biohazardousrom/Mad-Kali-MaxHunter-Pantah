@@ -415,7 +415,7 @@ static int tpm_add_char_device(struct tpm_chip *chip)
 		return rc;
 	}
 
-	if (chip->flags & TPM_CHIP_FLAG_TPM2) {
+	if (chip->flags & TPM_CHIP_FLAG_TPM2 && !tpm_is_firmware_upgrade(chip)) {
 		rc = tpm_devs_add(chip);
 		if (rc)
 			goto err_del_cdev;
@@ -444,13 +444,21 @@ static void tpm_del_char_device(struct tpm_chip *chip)
 
 	/* Make the driver uncallable. */
 	down_write(&chip->ops_sem);
-	if (chip->flags & TPM_CHIP_FLAG_TPM2) {
-		if (!tpm_chip_start(chip)) {
-			tpm2_shutdown(chip, TPM2_SU_CLEAR);
-			tpm_chip_stop(chip);
+
+	/*
+	 * Check if chip->ops is still valid: In case that the controller
+	 * drivers shutdown handler unregisters the controller in its
+	 * shutdown handler we are called twice and chip->ops to NULL.
+	 */
+	if (chip->ops) {
+		if (chip->flags & TPM_CHIP_FLAG_TPM2) {
+			if (!tpm_chip_start(chip)) {
+				tpm2_shutdown(chip, TPM2_SU_CLEAR);
+				tpm_chip_stop(chip);
+			}
 		}
+		chip->ops = NULL;
 	}
-	chip->ops = NULL;
 	up_write(&chip->ops_sem);
 }
 
@@ -458,7 +466,8 @@ static void tpm_del_legacy_sysfs(struct tpm_chip *chip)
 {
 	struct attribute **i;
 
-	if (chip->flags & (TPM_CHIP_FLAG_TPM2 | TPM_CHIP_FLAG_VIRTUAL))
+	if (chip->flags & (TPM_CHIP_FLAG_TPM2 | TPM_CHIP_FLAG_VIRTUAL) ||
+	    tpm_is_firmware_upgrade(chip))
 		return;
 
 	sysfs_remove_link(&chip->dev.parent->kobj, "ppi");
@@ -476,7 +485,8 @@ static int tpm_add_legacy_sysfs(struct tpm_chip *chip)
 	struct attribute **i;
 	int rc;
 
-	if (chip->flags & (TPM_CHIP_FLAG_TPM2 | TPM_CHIP_FLAG_VIRTUAL))
+	if (chip->flags & (TPM_CHIP_FLAG_TPM2 | TPM_CHIP_FLAG_VIRTUAL) ||
+		tpm_is_firmware_upgrade(chip))
 		return 0;
 
 	rc = compat_only_sysfs_link_entry_to_kobj(
@@ -501,12 +511,27 @@ static int tpm_hwrng_read(struct hwrng *rng, void *data, size_t max, bool wait)
 {
 	struct tpm_chip *chip = container_of(rng, struct tpm_chip, hwrng);
 
+	/* Give back zero bytes, as TPM chip has not yet fully resumed: */
+	if (chip->flags & TPM_CHIP_FLAG_SUSPENDED)
+		return 0;
+
 	return tpm_get_random(chip, data, max);
+}
+
+static bool tpm_is_hwrng_enabled(struct tpm_chip *chip)
+{
+	if (!IS_ENABLED(CONFIG_HW_RANDOM_TPM))
+		return false;
+	if (tpm_is_firmware_upgrade(chip))
+		return false;
+	if (chip->flags & TPM_CHIP_FLAG_HWRNG_DISABLED)
+		return false;
+	return true;
 }
 
 static int tpm_add_hwrng(struct tpm_chip *chip)
 {
-	if (!IS_ENABLED(CONFIG_HW_RANDOM_TPM))
+	if (!tpm_is_hwrng_enabled(chip))
 		return 0;
 
 	snprintf(chip->hwrng_name, sizeof(chip->hwrng_name),
@@ -520,6 +545,9 @@ static int tpm_get_pcr_allocation(struct tpm_chip *chip)
 {
 	int rc;
 
+	if (tpm_is_firmware_upgrade(chip))
+		return 0;
+
 	rc = (chip->flags & TPM_CHIP_FLAG_TPM2) ?
 	     tpm2_get_pcr_allocation(chip) :
 	     tpm1_get_pcr_allocation(chip);
@@ -529,6 +557,42 @@ static int tpm_get_pcr_allocation(struct tpm_chip *chip)
 
 	return rc;
 }
+
+/*
+ * tpm_chip_bootstrap() - Boostrap TPM chip after power on
+ * @chip: TPM chip to use.
+ *
+ * Initialize TPM chip after power on. This a one-shot function: subsequent
+ * calls will have no effect.
+ */
+int tpm_chip_bootstrap(struct tpm_chip *chip)
+{
+	int rc;
+
+	if (chip->flags & TPM_CHIP_FLAG_BOOTSTRAPPED)
+		return 0;
+
+	rc = tpm_chip_start(chip);
+	if (rc)
+		return rc;
+
+	rc = tpm_auto_startup(chip);
+	if (rc)
+		goto stop;
+
+	rc = tpm_get_pcr_allocation(chip);
+stop:
+	tpm_chip_stop(chip);
+
+	/*
+	 * Unconditionally set, as driver initialization should cease, when the
+	 * boostrapping process fails.
+	 */
+	chip->flags |= TPM_CHIP_FLAG_BOOTSTRAPPED;
+
+	return rc;
+}
+EXPORT_SYMBOL_GPL(tpm_chip_bootstrap);
 
 /*
  * tpm_chip_register() - create a character device for the TPM chip
@@ -545,17 +609,7 @@ int tpm_chip_register(struct tpm_chip *chip)
 {
 	int rc;
 
-	rc = tpm_chip_start(chip);
-	if (rc)
-		return rc;
-	rc = tpm_auto_startup(chip);
-	if (rc) {
-		tpm_chip_stop(chip);
-		return rc;
-	}
-
-	rc = tpm_get_pcr_allocation(chip);
-	tpm_chip_stop(chip);
+	rc = tpm_chip_bootstrap(chip);
 	if (rc)
 		return rc;
 
@@ -582,7 +636,7 @@ int tpm_chip_register(struct tpm_chip *chip)
 	return 0;
 
 out_hwrng:
-	if (IS_ENABLED(CONFIG_HW_RANDOM_TPM))
+	if (tpm_is_hwrng_enabled(chip))
 		hwrng_unregister(&chip->hwrng);
 out_ppi:
 	tpm_bios_log_teardown(chip);
@@ -607,10 +661,10 @@ EXPORT_SYMBOL_GPL(tpm_chip_register);
 void tpm_chip_unregister(struct tpm_chip *chip)
 {
 	tpm_del_legacy_sysfs(chip);
-	if (IS_ENABLED(CONFIG_HW_RANDOM_TPM))
+	if (tpm_is_hwrng_enabled(chip))
 		hwrng_unregister(&chip->hwrng);
 	tpm_bios_log_teardown(chip);
-	if (chip->flags & TPM_CHIP_FLAG_TPM2)
+	if (chip->flags & TPM_CHIP_FLAG_TPM2 && !tpm_is_firmware_upgrade(chip))
 		tpm_devs_remove(chip);
 	tpm_del_char_device(chip);
 }

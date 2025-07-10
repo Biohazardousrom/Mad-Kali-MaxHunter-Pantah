@@ -13,16 +13,17 @@
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/kernel.h>
+#include <linux/media-bus-format.h>
 #include <linux/module.h>
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
 
 #include <asm/unaligned.h>
 
+#include <drm/display/drm_dp_helper.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_bridge.h>
 #include <drm/drm_crtc_helper.h>
-#include <drm/drm_dp_helper.h>
 #include <drm/drm_mipi_dsi.h>
 #include <drm/drm_of.h>
 #include <drm/drm_panel.h>
@@ -241,7 +242,7 @@ static inline u32 TC358775_LVCFG_PCLKDIV(uint32_t val)
 }
 
 #define TC358775_LVCFG_LVDLINK__MASK                         0x00000002
-#define TC358775_LVCFG_LVDLINK__SHIFT                        0
+#define TC358775_LVCFG_LVDLINK__SHIFT                        1
 static inline u32 TC358775_LVCFG_LVDLINK(uint32_t val)
 {
 	return ((val) << TC358775_LVCFG_LVDLINK__SHIFT) &
@@ -339,6 +340,7 @@ static void d2l_read(struct i2c_client *i2c, u16 addr, u32 *val)
 		goto fail;
 
 	pr_debug("d2l: I2C : addr:%04x value:%08x\n", addr, *val);
+	return;
 
 fail:
 	dev_err(&i2c->dev, "Error %d reading from subaddress 0x%x\n",
@@ -429,7 +431,7 @@ static void tc_bridge_enable(struct drm_bridge *bridge)
 		val = TC358775_VPCTRL_MSF(1);
 
 	dsiclk = mode->crtc_clock * 3 * tc->bpc / tc->num_dsi_lanes / 1000;
-	clkdiv = dsiclk / DIVIDE_BY_3 * tc->lvds_link;
+	clkdiv = dsiclk / (tc->lvds_link == DUAL_LINK ? DIVIDE_BY_6 : DIVIDE_BY_3);
 	byteclk = dsiclk / 4;
 	t1 = hactive * (tc->bpc * 3 / 8) / tc->num_dsi_lanes;
 	t2 = ((100000 / clkdiv)) * (hactive + hback_porch + hsync_len + hfront_porch) / 1000;
@@ -453,10 +455,6 @@ static void tc_bridge_enable(struct drm_bridge *bridge)
 	dev_dbg(tc->dev, "bus_formats %04x bpc %d\n",
 		connector->display_info.bus_formats[0],
 		tc->bpc);
-	/*
-	 * Default hardware register settings of tc358775 configured
-	 * with MEDIA_BUS_FMT_RGB888_1X7X4_JEIDA jeida-24 format
-	 */
 	if (connector->display_info.bus_formats[0] ==
 		MEDIA_BUS_FMT_RGB888_1X7X4_SPWG) {
 		/* VESA-24 */
@@ -467,14 +465,15 @@ static void tc_bridge_enable(struct drm_bridge *bridge)
 		d2l_write(tc->i2c, LV_MX1619, LV_MX(LVI_B6, LVI_B7, LVI_B1, LVI_B2));
 		d2l_write(tc->i2c, LV_MX2023, LV_MX(LVI_B3, LVI_B4, LVI_B5, LVI_L0));
 		d2l_write(tc->i2c, LV_MX2427, LV_MX(LVI_HS, LVI_VS, LVI_DE, LVI_R6));
-	} else { /*  MEDIA_BUS_FMT_RGB666_1X7X3_SPWG - JEIDA-18 */
-		d2l_write(tc->i2c, LV_MX0003, LV_MX(LVI_R0, LVI_R1, LVI_R2, LVI_R3));
-		d2l_write(tc->i2c, LV_MX0407, LV_MX(LVI_R4, LVI_L0, LVI_R5, LVI_G0));
-		d2l_write(tc->i2c, LV_MX0811, LV_MX(LVI_G1, LVI_G2, LVI_L0, LVI_L0));
-		d2l_write(tc->i2c, LV_MX1215, LV_MX(LVI_G3, LVI_G4, LVI_G5, LVI_B0));
-		d2l_write(tc->i2c, LV_MX1619, LV_MX(LVI_L0, LVI_L0, LVI_B1, LVI_B2));
-		d2l_write(tc->i2c, LV_MX2023, LV_MX(LVI_B3, LVI_B4, LVI_B5, LVI_L0));
-		d2l_write(tc->i2c, LV_MX2427, LV_MX(LVI_HS, LVI_VS, LVI_DE, LVI_L0));
+	} else {
+		/* JEIDA-18 and JEIDA-24 */
+		d2l_write(tc->i2c, LV_MX0003, LV_MX(LVI_R2, LVI_R3, LVI_R4, LVI_R5));
+		d2l_write(tc->i2c, LV_MX0407, LV_MX(LVI_R6, LVI_R1, LVI_R7, LVI_G2));
+		d2l_write(tc->i2c, LV_MX0811, LV_MX(LVI_G3, LVI_G4, LVI_G0, LVI_G1));
+		d2l_write(tc->i2c, LV_MX1215, LV_MX(LVI_G5, LVI_G6, LVI_G7, LVI_B2));
+		d2l_write(tc->i2c, LV_MX1619, LV_MX(LVI_B0, LVI_B1, LVI_B3, LVI_B4));
+		d2l_write(tc->i2c, LV_MX2023, LV_MX(LVI_B5, LVI_B6, LVI_B7, LVI_L0));
+		d2l_write(tc->i2c, LV_MX2427, LV_MX(LVI_HS, LVI_VS, LVI_DE, LVI_R0));
 	}
 
 	d2l_write(tc->i2c, VFUEN, VFUEN_EN);
@@ -529,8 +528,7 @@ static int tc358775_parse_dt(struct device_node *np, struct tc_data *tc)
 	struct device_node *endpoint;
 	struct device_node *parent;
 	struct device_node *remote;
-	struct property *prop;
-	int len = 0;
+	int dsi_lanes = -1;
 
 	/*
 	 * To get the data-lanes of dsi, we need to access the dsi0_out of port1
@@ -544,25 +542,15 @@ static int tc358775_parse_dt(struct device_node *np, struct tc_data *tc)
 		of_node_put(endpoint);
 		if (parent) {
 			/* dsi0 port 1 */
-			endpoint = of_graph_get_endpoint_by_regs(parent, 1, -1);
+			dsi_lanes = drm_of_get_data_lanes_count_ep(parent, 1, -1, 1, 4);
 			of_node_put(parent);
-			if (endpoint) {
-				prop = of_find_property(endpoint, "data-lanes",
-							&len);
-				of_node_put(endpoint);
-				if (!prop) {
-					dev_err(tc->dev,
-						"failed to find data lane\n");
-					return -EPROBE_DEFER;
-				}
-			}
 		}
 	}
 
-	tc->num_dsi_lanes = len / sizeof(u32);
+	if (dsi_lanes < 0)
+		return dsi_lanes;
 
-	if (tc->num_dsi_lanes < 1 || tc->num_dsi_lanes > 4)
-		return -EINVAL;
+	tc->num_dsi_lanes = dsi_lanes;
 
 	tc->host_node = of_graph_get_remote_node(np, 0, 0);
 	if (!tc->host_node)
@@ -594,48 +582,10 @@ static int tc_bridge_attach(struct drm_bridge *bridge,
 			    enum drm_bridge_attach_flags flags)
 {
 	struct tc_data *tc = bridge_to_tc(bridge);
-	struct device *dev = &tc->i2c->dev;
-	struct mipi_dsi_host *host;
-	struct mipi_dsi_device *dsi;
-	int ret;
-
-	const struct mipi_dsi_device_info info = { .type = "tc358775",
-							.channel = 0,
-							.node = NULL,
-						};
-
-	host = of_find_mipi_dsi_host_by_node(tc->host_node);
-	if (!host) {
-		dev_err(dev, "failed to find dsi host\n");
-		return -EPROBE_DEFER;
-	}
-
-	dsi = mipi_dsi_device_register_full(host, &info);
-	if (IS_ERR(dsi)) {
-		dev_err(dev, "failed to create dsi device\n");
-		ret = PTR_ERR(dsi);
-		goto err_dsi_device;
-	}
-
-	tc->dsi = dsi;
-
-	dsi->lanes = tc->num_dsi_lanes;
-	dsi->format = MIPI_DSI_FMT_RGB888;
-	dsi->mode_flags = MIPI_DSI_MODE_VIDEO;
-
-	ret = mipi_dsi_attach(dsi);
-	if (ret < 0) {
-		dev_err(dev, "failed to attach dsi to host\n");
-		goto err_dsi_attach;
-	}
 
 	/* Attach the panel-bridge to the dsi bridge */
 	return drm_bridge_attach(bridge->encoder, tc->panel_bridge,
 				 &tc->bridge, flags);
-err_dsi_attach:
-	mipi_dsi_device_unregister(dsi);
-err_dsi_device:
-	return ret;
 }
 
 static const struct drm_bridge_funcs tc_bridge_funcs = {
@@ -646,10 +596,45 @@ static const struct drm_bridge_funcs tc_bridge_funcs = {
 	.post_disable = tc_bridge_post_disable,
 };
 
+static int tc_attach_host(struct tc_data *tc)
+{
+	struct device *dev = &tc->i2c->dev;
+	struct mipi_dsi_host *host;
+	struct mipi_dsi_device *dsi;
+	int ret;
+	const struct mipi_dsi_device_info info = { .type = "tc358775",
+							.channel = 0,
+							.node = NULL,
+						};
+
+	host = of_find_mipi_dsi_host_by_node(tc->host_node);
+	if (!host)
+		return dev_err_probe(dev, -EPROBE_DEFER, "failed to find dsi host\n");
+
+	dsi = devm_mipi_dsi_device_register_full(dev, host, &info);
+	if (IS_ERR(dsi)) {
+		dev_err(dev, "failed to create dsi device\n");
+		return PTR_ERR(dsi);
+	}
+
+	tc->dsi = dsi;
+
+	dsi->lanes = tc->num_dsi_lanes;
+	dsi->format = MIPI_DSI_FMT_RGB888;
+	dsi->mode_flags = MIPI_DSI_MODE_VIDEO;
+
+	ret = devm_mipi_dsi_attach(dev, dsi);
+	if (ret < 0) {
+		dev_err(dev, "failed to attach dsi to host\n");
+		return ret;
+	}
+
+	return 0;
+}
+
 static int tc_probe(struct i2c_client *client, const struct i2c_device_id *id)
 {
 	struct device *dev = &client->dev;
-	struct drm_panel *panel;
 	struct tc_data *tc;
 	int ret;
 
@@ -660,14 +645,8 @@ static int tc_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	tc->dev = dev;
 	tc->i2c = client;
 
-	ret = drm_of_find_panel_or_bridge(dev->of_node, TC358775_LVDS_OUT0,
-					  0, &panel, NULL);
-	if (ret < 0)
-		return ret;
-	if (!panel)
-		return -ENODEV;
-
-	tc->panel_bridge = devm_drm_panel_bridge_add(dev, panel);
+	tc->panel_bridge = devm_drm_of_get_bridge(dev, dev->of_node,
+						  TC358775_LVDS_OUT0, 0);
 	if (IS_ERR(tc->panel_bridge))
 		return PTR_ERR(tc->panel_bridge);
 
@@ -709,16 +688,22 @@ static int tc_probe(struct i2c_client *client, const struct i2c_device_id *id)
 
 	i2c_set_clientdata(client, tc);
 
+	ret = tc_attach_host(tc);
+	if (ret)
+		goto err_bridge_remove;
+
 	return 0;
+
+err_bridge_remove:
+	drm_bridge_remove(&tc->bridge);
+	return ret;
 }
 
-static int tc_remove(struct i2c_client *client)
+static void tc_remove(struct i2c_client *client)
 {
 	struct tc_data *tc = i2c_get_clientdata(client);
 
 	drm_bridge_remove(&tc->bridge);
-
-	return 0;
 }
 
 static const struct i2c_device_id tc358775_i2c_ids[] = {

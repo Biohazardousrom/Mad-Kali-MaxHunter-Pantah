@@ -48,7 +48,6 @@ static int ipq4019_regulator_probe(struct platform_device *pdev)
 	struct regulator_init_data *init_data;
 	struct regulator_config cfg = {};
 	struct regulator_dev *rdev;
-	struct resource *res;
 	struct regmap *rmap;
 	void __iomem *base;
 
@@ -57,8 +56,7 @@ static int ipq4019_regulator_probe(struct platform_device *pdev)
 	if (!init_data)
 		return -EINVAL;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	base = devm_ioremap_resource(dev, res);
+	base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(base))
 		return PTR_ERR(base);
 
@@ -86,6 +84,7 @@ static const struct of_device_id regulator_ipq4019_of_match[] = {
 	{ .compatible = "qcom,vqmmc-ipq4019-regulator", },
 	{},
 };
+MODULE_DEVICE_TABLE(of, regulator_ipq4019_of_match);
 
 static struct platform_driver ipq4019_regulator_driver = {
 	.probe = ipq4019_regulator_probe,

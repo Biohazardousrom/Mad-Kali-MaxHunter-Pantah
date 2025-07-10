@@ -31,6 +31,9 @@ struct iscsi_sw_tcp_conn {
 	/* Taken when accessing the sock from the netlink/sysfs interface */
 	struct mutex		sock_lock;
 
+	struct work_struct	recvwork;
+	bool			queue_recv;
+
 	struct iscsi_sw_tcp_send out;
 	/* old values for socket callbacks */
 	void			(*old_data_ready)(struct sock *);

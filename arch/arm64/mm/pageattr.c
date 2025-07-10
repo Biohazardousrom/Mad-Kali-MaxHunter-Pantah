@@ -11,6 +11,7 @@
 #include <asm/cacheflush.h>
 #include <asm/set_memory.h>
 #include <asm/tlbflush.h>
+#include <asm/kfence.h>
 
 struct page_change_data {
 	pgprot_t set_mask;
@@ -18,6 +19,19 @@ struct page_change_data {
 };
 
 bool rodata_full __ro_after_init = IS_ENABLED(CONFIG_RODATA_FULL_DEFAULT_ENABLED);
+
+bool can_set_direct_map(void)
+{
+	/*
+	 * rodata_full and DEBUG_PAGEALLOC require linear map to be
+	 * mapped at page granularity, so that it is possible to
+	 * protect/unprotect single pages.
+	 *
+	 * KFENCE pool requires page-granular mapping if initialized late.
+	 */
+	return rodata_full || debug_pagealloc_enabled() ||
+	       arm64_kfence_can_set_direct_map();
+}
 
 static int change_page_range(pte_t *ptep, unsigned long addr, void *data)
 {
@@ -148,6 +162,23 @@ int set_memory_valid(unsigned long addr, int numpages, int enable)
 					__pgprot(PTE_VALID));
 }
 
+/*
+ * Only to be used with memory in the logical map (e.g. vmapped memory will
+ * face coherency issues as we don't call vm_unmap_aliases()). Only to be used
+ * whilst accesses are not ongoing to the region, as we do not follow the
+ * make-before-break sequence in order to cut down the run time of this
+ * function.
+ */
+int arch_set_direct_map_range_uncached(unsigned long addr, unsigned long numpages)
+{
+	if (!can_set_direct_map())
+		return 0;
+
+	return __change_memory_common(addr, PAGE_SIZE * numpages,
+				      __pgprot(PTE_ATTRINDX(MT_NORMAL_NC)),
+				      __pgprot(PTE_ATTRINDX_MASK));
+}
+
 int set_direct_map_invalid_noflush(struct page *page)
 {
 	struct page_change_data data = {
@@ -155,7 +186,7 @@ int set_direct_map_invalid_noflush(struct page *page)
 		.clear_mask = __pgprot(PTE_VALID),
 	};
 
-	if (!rodata_full)
+	if (!can_set_direct_map())
 		return 0;
 
 	return apply_to_page_range(&init_mm,
@@ -170,7 +201,7 @@ int set_direct_map_default_noflush(struct page *page)
 		.clear_mask = __pgprot(PTE_RDONLY),
 	};
 
-	if (!rodata_full)
+	if (!can_set_direct_map())
 		return 0;
 
 	return apply_to_page_range(&init_mm,
@@ -178,13 +209,15 @@ int set_direct_map_default_noflush(struct page *page)
 				   PAGE_SIZE, change_page_range, &data);
 }
 
+#ifdef CONFIG_DEBUG_PAGEALLOC
 void __kernel_map_pages(struct page *page, int numpages, int enable)
 {
-	if (!debug_pagealloc_enabled() && !rodata_full)
+	if (!can_set_direct_map())
 		return;
 
 	set_memory_valid((unsigned long)page_address(page), numpages, enable);
 }
+#endif /* CONFIG_DEBUG_PAGEALLOC */
 
 /*
  * This function is used to determine if a linear map page has been marked as
@@ -203,9 +236,6 @@ bool kernel_page_present(struct page *page)
 	pmd_t *pmdp, pmd;
 	pte_t *ptep;
 	unsigned long addr = (unsigned long)page_address(page);
-
-	if (!debug_pagealloc_enabled() && !rodata_full)
-		return true;
 
 	pgdp = pgd_offset_k(addr);
 	if (pgd_none(READ_ONCE(*pgdp)))

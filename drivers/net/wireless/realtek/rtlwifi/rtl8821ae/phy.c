@@ -63,7 +63,7 @@ static void rtl8812ae_fixspur(struct ieee80211_hw *hw,
 			rtl_set_bbreg(hw, RRFMOD, 0xC00, 0x2);
 			/* 0x8AC[11:10] = 2'b10*/
 
-		/* <20120914, Kordan> A workarould to resolve
+		/* <20120914, Kordan> A workaround to resolve
 		 * 2480Mhz spur by setting ADC clock as 160M. (Asked by Binson)
 		 */
 		if (band_width == HT_CHANNEL_WIDTH_20 &&
@@ -83,7 +83,7 @@ static void rtl8812ae_fixspur(struct ieee80211_hw *hw,
 			/*0x8C4[30] = 0*/
 		}
 	} else if (rtlhal->hw_type == HARDWARE_TYPE_RTL8812AE) {
-		/* <20120914, Kordan> A workarould to resolve
+		/* <20120914, Kordan> A workaround to resolve
 		 * 2480Mhz spur by setting ADC clock as 160M.
 		 */
 		if (band_width == HT_CHANNEL_WIDTH_20 &&
@@ -595,11 +595,10 @@ void rtl8821ae_phy_switch_wirelessband(struct ieee80211_hw *hw, u8 band)
 	struct rtl_hal *rtlhal = rtl_hal(rtl_priv(hw));
 	struct rtl_dm *rtldm = rtl_dm(rtlpriv);
 	u8 current_band = rtlhal->current_bandtype;
-	u32 txpath, rxpath;
 	s8 bb_diff_between_band;
 
-	txpath = rtl8821ae_phy_query_bb_reg(hw, RTXPATH, 0xf0);
-	rxpath = rtl8821ae_phy_query_bb_reg(hw, RCCK_RX, 0x0f000000);
+	rtl8821ae_phy_query_bb_reg(hw, RTXPATH, 0xf0);
+	rtl8821ae_phy_query_bb_reg(hw, RCCK_RX, 0x0f000000);
 	rtlhal->current_bandtype = (enum band_type) band;
 	/* reconfig BB/RF according to wireless mode */
 	if (rtlhal->current_bandtype == BAND_ON_2_4G) {
@@ -1802,7 +1801,7 @@ static bool _rtl8821ae_phy_bb8821a_config_parafile(struct ieee80211_hw *hw)
 		return false;
 	}
 	_rtl8821ae_phy_init_tx_power_by_rate(hw);
-	if (rtlefuse->autoload_failflag == false) {
+	if (!rtlefuse->autoload_failflag) {
 		rtstatus = _rtl8821ae_phy_config_bb_with_pgheaderfile(hw,
 						    BASEBAND_CONFIG_PHY_REG);
 	}
@@ -2075,12 +2074,10 @@ bool rtl8812ae_phy_config_rf_with_headerfile(struct ieee80211_hw *hw,
 		return __rtl8821ae_phy_config_with_headerfile(hw,
 				radioa_array_table_a, radioa_arraylen_a,
 				_rtl8821ae_config_rf_radio_a);
-		break;
 	case RF90_PATH_B:
 		return __rtl8821ae_phy_config_with_headerfile(hw,
 				radioa_array_table_b, radioa_arraylen_b,
 				_rtl8821ae_config_rf_radio_b);
-		break;
 	case RF90_PATH_C:
 	case RF90_PATH_D:
 		pr_err("switch case %#x not processed\n", rfpath);
@@ -2106,7 +2103,6 @@ bool rtl8821ae_phy_config_rf_with_headerfile(struct ieee80211_hw *hw,
 		return __rtl8821ae_phy_config_with_headerfile(hw,
 			radioa_array_table, radioa_arraylen,
 			_rtl8821ae_config_rf_radio_a);
-		break;
 
 	case RF90_PATH_B:
 	case RF90_PATH_C:
@@ -2439,8 +2435,9 @@ static s8 _rtl8812ae_phy_get_txpower_limit(struct ieee80211_hw *hw,
 	else if (band == BAND_ON_5G)
 		channel_temp = _rtl8812ae_phy_get_chnl_idx_of_txpwr_lmt(hw,
 		BAND_ON_5G, channel);
-	else if (band == BAND_ON_BOTH)
+	else if (band == BAND_ON_BOTH) {
 		;/* BAND_ON_BOTH don't care temporarily */
+	}
 
 	if (band_temp == -1 || regulation == -1 || bandwidth_temp == -1 ||
 		rate_section == -1 || channel_temp == -1) {
@@ -3840,7 +3837,7 @@ static void _rtl8821ae_iqk_tx(struct ieee80211_hw *hw, enum radio_path path)
 			else
 				rtl_write_dword(rtlpriv, 0xc8c, 0x00163e96);
 
-			if (vdf_enable == 1) {
+			if (vdf_enable) {
 				rtl_dbg(rtlpriv, COMP_IQK, DBG_LOUD, "VDF_enable\n");
 				for (k = 0; k <= 2; k++) {
 					switch (k) {
@@ -3972,7 +3969,7 @@ static void _rtl8821ae_iqk_tx(struct ieee80211_hw *hw, enum radio_path path)
 				}
 			}
 
-			if (tx0iqkok == false)
+			if (!tx0iqkok)
 				break;				/* TXK fail, Don't do RXK */
 
 			if (vdf_enable == 1) {
@@ -4082,7 +4079,7 @@ static void _rtl8821ae_iqk_tx(struct ieee80211_hw *hw, enum radio_path path)
 						}
 					}
 
-					if (tx0iqkok == false) {   /* If RX mode TXK fail, then take TXK Result */
+					if (!tx0iqkok) {   /* If RX mode TXK fail, then take TXK Result */
 						tx_x0_rxk[cal] = tx_x0[cal];
 						tx_y0_rxk[cal] = tx_y0[cal];
 						tx0iqkok = true;
@@ -4241,7 +4238,7 @@ static void _rtl8821ae_iqk_tx(struct ieee80211_hw *hw, enum radio_path path)
 					}
 				}
 
-				if (tx0iqkok == false) {   /* If RX mode TXK fail, then take TXK Result */
+				if (!tx0iqkok) {   /* If RX mode TXK fail, then take TXK Result */
 					tx_x0_rxk[cal] = tx_x0[cal];
 					tx_y0_rxk[cal] = tx_y0[cal];
 					tx0iqkok = true;

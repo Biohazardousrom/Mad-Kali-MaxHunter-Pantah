@@ -430,6 +430,7 @@ struct snd_soc_dapm_widget *snd_soc_dapm_new_control_unlocked(
 		const struct snd_soc_dapm_widget *widget);
 int snd_soc_dapm_new_dai_widgets(struct snd_soc_dapm_context *dapm,
 				 struct snd_soc_dai *dai);
+void snd_soc_dapm_free_widget(struct snd_soc_dapm_widget *w);
 int snd_soc_dapm_link_dai_widgets(struct snd_soc_card *card);
 void snd_soc_dapm_connect_dai_link_widgets(struct snd_soc_card *card);
 
@@ -557,11 +558,6 @@ enum snd_soc_dapm_type {
 
 	/* Don't edit below this line */
 	SND_SOC_DAPM_TYPE_COUNT
-};
-
-enum snd_soc_dapm_subclass {
-	SND_SOC_DAPM_CLASS_INIT		= 0,
-	SND_SOC_DAPM_CLASS_RUNTIME	= 1,
 };
 
 /*

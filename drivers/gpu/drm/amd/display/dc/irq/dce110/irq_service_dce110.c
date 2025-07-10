@@ -23,8 +23,6 @@
  *
  */
 
-#include <linux/slab.h>
-
 #include "dm_services.h"
 
 #include "include/logger_interface.h"
@@ -185,16 +183,18 @@ bool dal_irq_service_dummy_set(struct irq_service *irq_service,
 			       const struct irq_source_info *info,
 			       bool enable)
 {
-	DC_LOG_ERROR("%s: called for non-implemented irq source\n",
-		     __func__);
+	DC_LOG_ERROR("%s: called for non-implemented irq source, src_id=%u, ext_id=%u\n",
+		     __func__, info->src_id, info->ext_id);
+
 	return false;
 }
 
 bool dal_irq_service_dummy_ack(struct irq_service *irq_service,
 			       const struct irq_source_info *info)
 {
-	DC_LOG_ERROR("%s: called for non-implemented irq source\n",
-		     __func__);
+	DC_LOG_ERROR("%s: called for non-implemented irq source, src_id=%u, ext_id=%u\n",
+		     __func__, info->src_id, info->ext_id);
+
 	return false;
 }
 
@@ -211,8 +211,12 @@ bool dce110_vblank_set(struct irq_service *irq_service,
 						   info->ext_id);
 	uint8_t pipe_offset = dal_irq_src - IRQ_TYPE_VBLANK;
 
-	struct timing_generator *tg =
-			dc->current_state->res_ctx.pipe_ctx[pipe_offset].stream_res.tg;
+	struct timing_generator *tg;
+
+	if (pipe_offset >= MAX_PIPES)
+		return false;
+
+	tg = dc->current_state->res_ctx.pipe_ctx[pipe_offset].stream_res.tg;
 
 	if (enable) {
 		if (!tg || !tg->funcs->arm_vert_intr(tg, 2)) {

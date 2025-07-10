@@ -72,6 +72,7 @@ static int tipc_l2_rcv_msg(struct sk_buff *skb, struct net_device *dev,
 
 /**
  * tipc_media_find - locates specified media object by name
+ * @name: name to locate
  */
 struct tipc_media *tipc_media_find(const char *name)
 {
@@ -86,6 +87,7 @@ struct tipc_media *tipc_media_find(const char *name)
 
 /**
  * media_find_id - locates specified media object by type identifier
+ * @type: type identifier to locate
  */
 static struct tipc_media *media_find_id(u8 type)
 {
@@ -100,6 +102,9 @@ static struct tipc_media *media_find_id(u8 type)
 
 /**
  * tipc_media_addr_printf - record media address in print buffer
+ * @buf: output buffer
+ * @len: output buffer size remaining
+ * @a: input media address
  */
 int tipc_media_addr_printf(char *buf, int len, struct tipc_media_addr *a)
 {
@@ -127,7 +132,7 @@ int tipc_media_addr_printf(char *buf, int len, struct tipc_media_addr *a)
  * @name: ptr to bearer name string
  * @name_parts: ptr to area for bearer name components (or NULL if not needed)
  *
- * Returns 1 if bearer name is valid, otherwise 0.
+ * Return: 1 if bearer name is valid, otherwise 0.
  */
 static int bearer_name_validate(const char *name,
 				struct tipc_bearer_names *name_parts)
@@ -139,10 +144,7 @@ static int bearer_name_validate(const char *name,
 	u32 if_len;
 
 	/* copy bearer name & ensure length is OK */
-	name_copy[TIPC_MAX_BEARER_NAME - 1] = 0;
-	/* need above in case non-Posix strncpy() doesn't pad with nulls */
-	strncpy(name_copy, name, TIPC_MAX_BEARER_NAME);
-	if (name_copy[TIPC_MAX_BEARER_NAME - 1] != 0)
+	if (strscpy(name_copy, name, TIPC_MAX_BEARER_NAME) < 0)
 		return 0;
 
 	/* ensure all component parts of bearer name are present */
@@ -169,6 +171,8 @@ static int bearer_name_validate(const char *name,
 
 /**
  * tipc_bearer_find - locates bearer object with matching bearer name
+ * @net: the applicable net namespace
+ * @name: bearer name to locate
  */
 struct tipc_bearer *tipc_bearer_find(struct net *net, const char *name)
 {
@@ -231,6 +235,12 @@ void tipc_bearer_remove_dest(struct net *net, u32 bearer_id, u32 dest)
 
 /**
  * tipc_enable_bearer - enable bearer with the given name
+ * @net: the applicable net namespace
+ * @name: bearer name to enable
+ * @disc_domain: bearer domain
+ * @prio: bearer priority
+ * @attr: nlattr array
+ * @extack: netlink extended ack
  */
 static int tipc_enable_bearer(struct net *net, const char *name,
 			      u32 disc_domain, u32 prio,
@@ -363,6 +373,8 @@ rejected:
 
 /**
  * tipc_reset_bearer - Reset all links established over this bearer
+ * @net: the applicable net namespace
+ * @b: the target bearer
  */
 static int tipc_reset_bearer(struct net *net, struct tipc_bearer *b)
 {
@@ -384,7 +396,9 @@ void tipc_bearer_put(struct tipc_bearer *b)
 }
 
 /**
- * bearer_disable
+ * bearer_disable - disable this bearer
+ * @net: the applicable net namespace
+ * @b: the bearer to disable
  *
  * Note: This routine assumes caller holds RTNL lock.
  */
@@ -449,12 +463,13 @@ int tipc_enable_l2_media(struct net *net, struct tipc_bearer *b,
 	b->bcast_addr.media_id = b->media->type_id;
 	b->bcast_addr.broadcast = TIPC_BROADCAST_SUPPORT;
 	b->mtu = dev->mtu;
-	b->media->raw2addr(b, &b->addr, (char *)dev->dev_addr);
+	b->media->raw2addr(b, &b->addr, (const char *)dev->dev_addr);
 	rcu_assign_pointer(dev->tipc_ptr, b);
 	return 0;
 }
 
 /* tipc_disable_l2_media - detach TIPC bearer from an L2 interface
+ * @b: the target bearer
  *
  * Mark L2 bearer as inactive so that incoming buffers are thrown away
  */
@@ -471,6 +486,7 @@ void tipc_disable_l2_media(struct tipc_bearer *b)
 
 /**
  * tipc_l2_send_msg - send a TIPC packet out over an L2 interface
+ * @net: the associated network namespace
  * @skb: the packet to be sent
  * @b: the bearer through which the packet is to be sent
  * @dest: peer destination address
@@ -521,6 +537,19 @@ int tipc_bearer_mtu(struct net *net, u32 bearer_id)
 	b = rcu_dereference(tipc_net(net)->bearer_list[bearer_id]);
 	if (b)
 		mtu = b->mtu;
+	rcu_read_unlock();
+	return mtu;
+}
+
+int tipc_bearer_min_mtu(struct net *net, u32 bearer_id)
+{
+	int mtu = TIPC_MIN_BEARER_MTU;
+	struct tipc_bearer *b;
+
+	rcu_read_lock();
+	b = bearer_get(net, bearer_id);
+	if (b)
+		mtu += b->encap_hlen;
 	rcu_read_unlock();
 	return mtu;
 }
@@ -688,7 +717,7 @@ static int tipc_l2_device_event(struct notifier_block *nb, unsigned long evt,
 		break;
 	case NETDEV_CHANGEADDR:
 		b->media->raw2addr(b, &b->addr,
-				   (char *)dev->dev_addr);
+				   (const char *)dev->dev_addr);
 		tipc_reset_bearer(net, b);
 		break;
 	case NETDEV_UNREGISTER:
@@ -753,7 +782,7 @@ void tipc_clone_to_loopback(struct net *net, struct sk_buff_head *pkts)
 		skb->pkt_type = PACKET_HOST;
 		skb->ip_summed = CHECKSUM_UNNECESSARY;
 		skb->protocol = eth_type_trans(skb, dev);
-		netif_rx_ni(skb);
+		netif_rx(skb);
 	}
 }
 
@@ -772,7 +801,7 @@ int tipc_attach_loopback(struct net *net)
 	if (!dev)
 		return -ENODEV;
 
-	dev_hold(dev);
+	netdev_hold(dev, &tn->loopback_pt.dev_tracker, GFP_KERNEL);
 	tn->loopback_pt.dev = dev;
 	tn->loopback_pt.type = htons(ETH_P_TIPC);
 	tn->loopback_pt.func = tipc_loopback_rcv_pkt;
@@ -785,7 +814,7 @@ void tipc_detach_loopback(struct net *net)
 	struct tipc_net *tn = tipc_net(net);
 
 	dev_remove_pack(&tn->loopback_pt);
-	dev_put(net->loopback_dev);
+	netdev_put(net->loopback_dev, &tn->loopback_pt.dev_tracker);
 }
 
 /* Caller should hold rtnl_lock to protect the bearer */
@@ -1128,8 +1157,8 @@ int __tipc_nl_bearer_set(struct sk_buff *skb, struct genl_info *info)
 				return -EINVAL;
 			}
 #ifdef CONFIG_TIPC_MEDIA_UDP
-			if (tipc_udp_mtu_bad(nla_get_u32
-					     (props[TIPC_NLA_PROP_MTU]))) {
+			if (nla_get_u32(props[TIPC_NLA_PROP_MTU]) <
+			    b->encap_hlen + TIPC_MIN_BEARER_MTU) {
 				NL_SET_ERR_MSG(info->extack,
 					       "MTU value is out-of-range");
 				return -EINVAL;

@@ -136,13 +136,11 @@ static int am33xx_push_sram_idle(void)
 
 static int am33xx_do_sram_idle(u32 wfi_flags)
 {
-	int ret = 0;
-
 	if (!m3_ipc || !pm_ops)
 		return 0;
 
 	if (wfi_flags & WFI_FLAG_WAKE_M3)
-		ret = m3_ipc->ops->prepare_low_power(m3_ipc, WKUP_M3_IDLE);
+		m3_ipc->ops->prepare_low_power(m3_ipc, WKUP_M3_IDLE);
 
 	return pm_ops->cpu_suspend(am33xx_do_wfi_sram, wfi_flags);
 }
@@ -557,11 +555,9 @@ static int am33xx_pm_probe(struct platform_device *pdev)
 #endif /* CONFIG_SUSPEND */
 
 	pm_runtime_enable(dev);
-	ret = pm_runtime_get_sync(dev);
-	if (ret < 0) {
-		pm_runtime_put_noidle(dev);
+	ret = pm_runtime_resume_and_get(dev);
+	if (ret < 0)
 		goto err_pm_runtime_disable;
-	}
 
 	ret = pm_ops->init(am33xx_do_sram_idle);
 	if (ret) {

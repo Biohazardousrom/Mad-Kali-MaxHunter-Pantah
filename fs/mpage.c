@@ -32,20 +32,12 @@
 #include <linux/cleancache.h>
 #include "internal.h"
 
-#define CREATE_TRACE_POINTS
-#include <trace/events/android_fs.h>
-
-EXPORT_TRACEPOINT_SYMBOL(android_fs_datawrite_start);
-EXPORT_TRACEPOINT_SYMBOL(android_fs_datawrite_end);
-EXPORT_TRACEPOINT_SYMBOL(android_fs_dataread_start);
-EXPORT_TRACEPOINT_SYMBOL(android_fs_dataread_end);
-
 /*
  * I/O completion handler for multipage BIOs.
  *
  * The mpage code never puts partial pages into a BIO (except for end-of-file).
  * If a page does not map to a contiguous run of blocks then it simply falls
- * back to block_read_full_page().
+ * back to block_read_full_folio().
  *
  * Why is this?  If a page's completion depends on a number of different BIOs
  * which can complete in any order (or at the same time) then determining the
@@ -57,16 +49,6 @@ static void mpage_end_io(struct bio *bio)
 	struct bio_vec *bv;
 	struct bvec_iter_all iter_all;
 
-	if (trace_android_fs_dataread_end_enabled() &&
-	    (bio_data_dir(bio) == READ)) {
-		struct page *first_page = bio->bi_io_vec[0].bv_page;
-
-		if (first_page != NULL)
-			trace_android_fs_dataread_end(first_page->mapping->host,
-						      page_offset(first_page),
-						      bio->bi_iter.bi_size);
-	}
-
 	bio_for_each_segment_all(bv, bio, iter_all) {
 		struct page *page = bv->bv_page;
 		page_endio(page, bio_op(bio),
@@ -76,86 +58,46 @@ static void mpage_end_io(struct bio *bio)
 	bio_put(bio);
 }
 
-static struct bio *mpage_bio_submit(int op, int op_flags, struct bio *bio)
+static struct bio *mpage_bio_submit(struct bio *bio)
 {
-	if (trace_android_fs_dataread_start_enabled() && (op == REQ_OP_READ)) {
-		struct page *first_page = bio->bi_io_vec[0].bv_page;
-
-		if (first_page != NULL) {
-			char *path, pathbuf[MAX_TRACE_PATHBUF_LEN];
-
-			path = android_fstrace_get_pathname(pathbuf,
-						    MAX_TRACE_PATHBUF_LEN,
-						    first_page->mapping->host);
-			trace_android_fs_dataread_start(
-				first_page->mapping->host,
-				page_offset(first_page),
-				bio->bi_iter.bi_size,
-				current->pid,
-				path,
-				current->comm);
-		}
-	}
 	bio->bi_end_io = mpage_end_io;
-	bio_set_op_attrs(bio, op, op_flags);
 	guard_bio_eod(bio);
 	submit_bio(bio);
 	return NULL;
 }
 
-static struct bio *
-mpage_alloc(struct block_device *bdev,
-		sector_t first_sector, int nr_vecs,
-		gfp_t gfp_flags)
-{
-	struct bio *bio;
-
-	/* Restrict the given (page cache) mask for slab allocations */
-	gfp_flags &= GFP_KERNEL;
-	bio = bio_alloc(gfp_flags, nr_vecs);
-
-	if (bio == NULL && (current->flags & PF_MEMALLOC)) {
-		while (!bio && (nr_vecs /= 2))
-			bio = bio_alloc(gfp_flags, nr_vecs);
-	}
-
-	if (bio) {
-		bio_set_dev(bio, bdev);
-		bio->bi_iter.bi_sector = first_sector;
-	}
-	return bio;
-}
-
 /*
  * support function for mpage_readahead.  The fs supplied get_block might
  * return an up to date buffer.  This is used to map that buffer into
- * the page, which allows readpage to avoid triggering a duplicate call
+ * the page, which allows read_folio to avoid triggering a duplicate call
  * to get_block.
  *
  * The idea is to avoid adding buffers to pages that don't already have
  * them.  So when the buffer is up to date and the page size == block size,
  * this marks the page up to date instead of adding new buffers.
  */
-static void 
-map_buffer_to_page(struct page *page, struct buffer_head *bh, int page_block) 
+static void map_buffer_to_folio(struct folio *folio, struct buffer_head *bh,
+		int page_block)
 {
-	struct inode *inode = page->mapping->host;
+	struct inode *inode = folio->mapping->host;
 	struct buffer_head *page_bh, *head;
 	int block = 0;
 
-	if (!page_has_buffers(page)) {
+	head = folio_buffers(folio);
+	if (!head) {
 		/*
 		 * don't make any buffers if there is only one buffer on
-		 * the page and the page just needs to be set up to date
+		 * the folio and the folio just needs to be set up to date
 		 */
 		if (inode->i_blkbits == PAGE_SHIFT &&
 		    buffer_uptodate(bh)) {
-			SetPageUptodate(page);    
+			folio_mark_uptodate(folio);
 			return;
 		}
-		create_empty_buffers(page, i_blocksize(inode), 0);
+		create_empty_buffers(&folio->page, i_blocksize(inode), 0);
+		head = folio_buffers(folio);
 	}
-	head = page_buffers(page);
+
 	page_bh = head;
 	do {
 		if (block == page_block) {
@@ -171,7 +113,7 @@ map_buffer_to_page(struct page *page, struct buffer_head *bh, int page_block)
 
 struct mpage_readpage_args {
 	struct bio *bio;
-	struct page *page;
+	struct folio *folio;
 	unsigned int nr_pages;
 	bool is_readahead;
 	sector_t last_block_in_bio;
@@ -191,8 +133,8 @@ struct mpage_readpage_args {
  */
 static struct bio *do_mpage_readpage(struct mpage_readpage_args *args)
 {
-	struct page *page = args->page;
-	struct inode *inode = page->mapping->host;
+	struct folio *folio = args->folio;
+	struct inode *inode = folio->mapping->host;
 	const unsigned blkbits = inode->i_blkbits;
 	const unsigned blocks_per_page = PAGE_SIZE >> blkbits;
 	const unsigned blocksize = 1 << blkbits;
@@ -206,23 +148,23 @@ static struct bio *do_mpage_readpage(struct mpage_readpage_args *args)
 	struct block_device *bdev = NULL;
 	int length;
 	int fully_mapped = 1;
-	int op_flags;
+	blk_opf_t opf = REQ_OP_READ;
 	unsigned nblocks;
 	unsigned relative_block;
-	gfp_t gfp;
+	gfp_t gfp = mapping_gfp_constraint(folio->mapping, GFP_KERNEL);
+
+	/* MAX_BUF_PER_PAGE, for example */
+	VM_BUG_ON_FOLIO(folio_test_large(folio), folio);
 
 	if (args->is_readahead) {
-		op_flags = REQ_RAHEAD;
-		gfp = readahead_gfp_mask(page->mapping);
-	} else {
-		op_flags = 0;
-		gfp = mapping_gfp_constraint(page->mapping, GFP_KERNEL);
+		opf |= REQ_RAHEAD;
+		gfp |= __GFP_NORETRY | __GFP_NOWARN;
 	}
 
-	if (page_has_buffers(page))
+	if (folio_buffers(folio))
 		goto confused;
 
-	block_in_file = (sector_t)page->index << (PAGE_SHIFT - blkbits);
+	block_in_file = (sector_t)folio->index << (PAGE_SHIFT - blkbits);
 	last_block = block_in_file + args->nr_pages * blocks_per_page;
 	last_block_in_file = (i_size_read(inode) + blocksize - 1) >> blkbits;
 	if (last_block > last_block_in_file)
@@ -255,9 +197,9 @@ static struct bio *do_mpage_readpage(struct mpage_readpage_args *args)
 	}
 
 	/*
-	 * Then do more get_blocks calls until we are done with this page.
+	 * Then do more get_blocks calls until we are done with this folio.
 	 */
-	map_bh->b_page = page;
+	map_bh->b_page = &folio->page;
 	while (page_block < blocks_per_page) {
 		map_bh->b_state = 0;
 		map_bh->b_size = 0;
@@ -280,12 +222,12 @@ static struct bio *do_mpage_readpage(struct mpage_readpage_args *args)
 
 		/* some filesystems will copy data into the page during
 		 * the get_block call, in which case we don't want to
-		 * read it again.  map_buffer_to_page copies the data
-		 * we just collected from get_block into the page's buffers
-		 * so readpage doesn't have to repeat the get_block call
+		 * read it again.  map_buffer_to_folio copies the data
+		 * we just collected from get_block into the folio's buffers
+		 * so read_folio doesn't have to repeat the get_block call
 		 */
 		if (buffer_uptodate(map_bh)) {
-			map_buffer_to_page(page, map_bh, page_block);
+			map_buffer_to_folio(folio, map_bh, page_block);
 			goto confused;
 		}
 	
@@ -310,44 +252,45 @@ static struct bio *do_mpage_readpage(struct mpage_readpage_args *args)
 	}
 
 	if (first_hole != blocks_per_page) {
-		zero_user_segment(page, first_hole << blkbits, PAGE_SIZE);
+		folio_zero_segment(folio, first_hole << blkbits, PAGE_SIZE);
 		if (first_hole == 0) {
-			SetPageUptodate(page);
-			unlock_page(page);
+			folio_mark_uptodate(folio);
+			folio_unlock(folio);
 			goto out;
 		}
 	} else if (fully_mapped) {
-		SetPageMappedToDisk(page);
+		folio_set_mappedtodisk(folio);
 	}
 
-	if (fully_mapped && blocks_per_page == 1 && !PageUptodate(page) &&
-	    cleancache_get_page(page) == 0) {
-		SetPageUptodate(page);
+	if (fully_mapped && blocks_per_page == 1 && !folio_test_uptodate(folio) &&
+	    cleancache_get_page(&folio->page) == 0) {
+		folio_mark_uptodate(folio);
 		goto confused;
 	}
 
 	/*
-	 * This page will go to BIO.  Do we need to send this BIO off first?
+	 * This folio will go to BIO.  Do we need to send this BIO off first?
 	 */
 	if (args->bio && (args->last_block_in_bio != blocks[0] - 1))
-		args->bio = mpage_bio_submit(REQ_OP_READ, op_flags, args->bio);
+		args->bio = mpage_bio_submit(args->bio);
 
 alloc_new:
 	if (args->bio == NULL) {
 		if (first_hole == blocks_per_page) {
 			if (!bdev_read_page(bdev, blocks[0] << (blkbits - 9),
-								page))
+								&folio->page))
 				goto out;
 		}
-		args->bio = mpage_alloc(bdev, blocks[0] << (blkbits - 9),
-					bio_max_segs(args->nr_pages), gfp);
+		args->bio = bio_alloc(bdev, bio_max_segs(args->nr_pages), opf,
+				      gfp);
 		if (args->bio == NULL)
 			goto confused;
+		args->bio->bi_iter.bi_sector = blocks[0] << (blkbits - 9);
 	}
 
 	length = first_hole << blkbits;
-	if (bio_add_page(args->bio, page, length, 0) < length) {
-		args->bio = mpage_bio_submit(REQ_OP_READ, op_flags, args->bio);
+	if (!bio_add_folio(args->bio, folio, length, 0)) {
+		args->bio = mpage_bio_submit(args->bio);
 		goto alloc_new;
 	}
 
@@ -355,7 +298,7 @@ alloc_new:
 	nblocks = map_bh->b_size >> blkbits;
 	if ((buffer_boundary(map_bh) && relative_block == nblocks) ||
 	    (first_hole != blocks_per_page))
-		args->bio = mpage_bio_submit(REQ_OP_READ, op_flags, args->bio);
+		args->bio = mpage_bio_submit(args->bio);
 	else
 		args->last_block_in_bio = blocks[blocks_per_page - 1];
 out:
@@ -363,11 +306,11 @@ out:
 
 confused:
 	if (args->bio)
-		args->bio = mpage_bio_submit(REQ_OP_READ, op_flags, args->bio);
-	if (!PageUptodate(page))
-		block_read_full_page(page, args->get_block);
+		args->bio = mpage_bio_submit(args->bio);
+	if (!folio_test_uptodate(folio))
+		block_read_full_folio(folio, args->get_block);
 	else
-		unlock_page(page);
+		folio_unlock(folio);
 	goto out;
 }
 
@@ -412,41 +355,40 @@ confused:
  */
 void mpage_readahead(struct readahead_control *rac, get_block_t get_block)
 {
-	struct page *page;
+	struct folio *folio;
 	struct mpage_readpage_args args = {
 		.get_block = get_block,
 		.is_readahead = true,
 	};
 
-	while ((page = readahead_page(rac))) {
-		prefetchw(&page->flags);
-		args.page = page;
+	while ((folio = readahead_folio(rac))) {
+		prefetchw(&folio->flags);
+		args.folio = folio;
 		args.nr_pages = readahead_count(rac);
 		args.bio = do_mpage_readpage(&args);
-		put_page(page);
 	}
 	if (args.bio)
-		mpage_bio_submit(REQ_OP_READ, REQ_RAHEAD, args.bio);
+		mpage_bio_submit(args.bio);
 }
-EXPORT_SYMBOL_NS(mpage_readahead, ANDROID_GKI_VFS_EXPORT_ONLY);
+EXPORT_SYMBOL(mpage_readahead);
 
 /*
  * This isn't called much at all
  */
-int mpage_readpage(struct page *page, get_block_t get_block)
+int mpage_read_folio(struct folio *folio, get_block_t get_block)
 {
 	struct mpage_readpage_args args = {
-		.page = page,
+		.folio = folio,
 		.nr_pages = 1,
 		.get_block = get_block,
 	};
 
 	args.bio = do_mpage_readpage(&args);
 	if (args.bio)
-		mpage_bio_submit(REQ_OP_READ, 0, args.bio);
+		mpage_bio_submit(args.bio);
 	return 0;
 }
-EXPORT_SYMBOL_NS(mpage_readpage, ANDROID_GKI_VFS_EXPORT_ONLY);
+EXPORT_SYMBOL(mpage_read_folio);
 
 /*
  * Writing is not so simple.
@@ -469,7 +411,6 @@ struct mpage_data {
 	struct bio *bio;
 	sector_t last_block_in_bio;
 	get_block_t *get_block;
-	unsigned use_writepage;
 };
 
 /*
@@ -494,11 +435,11 @@ static void clean_buffers(struct page *page, unsigned first_unmapped)
 
 	/*
 	 * we cannot drop the bh if the page is not uptodate or a concurrent
-	 * readpage would fail to serialize with the bh and it would read from
+	 * read_folio would fail to serialize with the bh and it would read from
 	 * disk before we reach the platter.
 	 */
 	if (buffer_heads_over_limit && PageUptodate(page))
-		try_to_free_buffers(page);
+		try_to_free_buffers(page_folio(page));
 }
 
 /*
@@ -534,7 +475,6 @@ static int __mpage_writepage(struct page *page, struct writeback_control *wbc,
 	struct buffer_head map_bh;
 	loff_t i_size = i_size_read(inode);
 	int ret = 0;
-	int op_flags = wbc_to_write_flags(wbc);
 
 	if (page_has_buffers(page)) {
 		struct buffer_head *head = page_buffers(page);
@@ -547,7 +487,7 @@ static int __mpage_writepage(struct page *page, struct writeback_control *wbc,
 			if (!buffer_mapped(bh)) {
 				/*
 				 * unmapped dirty buffers are created by
-				 * __set_page_dirty_buffers -> mmapped data
+				 * block_dirty_folio -> mmapped data
 				 */
 				if (buffer_dirty(bh))
 					goto confused;
@@ -580,7 +520,7 @@ static int __mpage_writepage(struct page *page, struct writeback_control *wbc,
 		/*
 		 * Page has buffers, but they are all unmapped. The page was
 		 * created by pagein or read over a hole which was handled by
-		 * block_read_full_page().  If this address_space is also
+		 * block_read_full_folio().  If this address_space is also
 		 * using mpage_readahead then this can rarely happen.
 		 */
 		goto confused;
@@ -642,7 +582,7 @@ page_is_mapped:
 	 * This page will go to BIO.  Do we need to send this BIO off first?
 	 */
 	if (bio && mpd->last_block_in_bio != blocks[0] - 1)
-		bio = mpage_bio_submit(REQ_OP_WRITE, op_flags, bio);
+		bio = mpage_bio_submit(bio);
 
 alloc_new:
 	if (bio == NULL) {
@@ -651,13 +591,11 @@ alloc_new:
 								page, wbc))
 				goto out;
 		}
-		bio = mpage_alloc(bdev, blocks[0] << (blkbits - 9),
-				BIO_MAX_PAGES, GFP_NOFS|__GFP_HIGH);
-		if (bio == NULL)
-			goto confused;
-
+		bio = bio_alloc(bdev, BIO_MAX_VECS,
+				REQ_OP_WRITE | wbc_to_write_flags(wbc),
+				GFP_NOFS);
+		bio->bi_iter.bi_sector = blocks[0] << (blkbits - 9);
 		wbc_init_bio(wbc, bio);
-		bio->bi_write_hint = inode->i_write_hint;
 	}
 
 	/*
@@ -668,7 +606,7 @@ alloc_new:
 	wbc_account_cgroup_owner(wbc, page, PAGE_SIZE);
 	length = first_unmapped << blkbits;
 	if (bio_add_page(bio, page, length, 0) < length) {
-		bio = mpage_bio_submit(REQ_OP_WRITE, op_flags, bio);
+		bio = mpage_bio_submit(bio);
 		goto alloc_new;
 	}
 
@@ -678,7 +616,7 @@ alloc_new:
 	set_page_writeback(page);
 	unlock_page(page);
 	if (boundary || (first_unmapped != blocks_per_page)) {
-		bio = mpage_bio_submit(REQ_OP_WRITE, op_flags, bio);
+		bio = mpage_bio_submit(bio);
 		if (boundary_block) {
 			write_boundary_block(boundary_bdev,
 					boundary_block, 1 << blkbits);
@@ -690,17 +628,12 @@ alloc_new:
 
 confused:
 	if (bio)
-		bio = mpage_bio_submit(REQ_OP_WRITE, op_flags, bio);
+		bio = mpage_bio_submit(bio);
 
-	if (mpd->use_writepage) {
-		ret = mapping->a_ops->writepage(page, wbc);
-	} else {
-		ret = -EAGAIN;
-		goto out;
-	}
 	/*
 	 * The caller has a ref on the inode, so *mapping is stable
 	 */
+	ret = block_write_full_page(page, mpd->get_block, wbc);
 	mapping_set_error(mapping, ret);
 out:
 	mpd->bio = bio;
@@ -712,8 +645,6 @@ out:
  * @mapping: address space structure to write
  * @wbc: subtract the number of written pages from *@wbc->nr_to_write
  * @get_block: the filesystem's block mapper function.
- *             If this is NULL then use a_ops->writepage.  Otherwise, go
- *             direct-to-BIO.
  *
  * This is a library function, which implements the writepages()
  * address_space_operation.
@@ -730,48 +661,17 @@ int
 mpage_writepages(struct address_space *mapping,
 		struct writeback_control *wbc, get_block_t get_block)
 {
+	struct mpage_data mpd = {
+		.get_block	= get_block,
+	};
 	struct blk_plug plug;
 	int ret;
 
 	blk_start_plug(&plug);
-
-	if (!get_block)
-		ret = generic_writepages(mapping, wbc);
-	else {
-		struct mpage_data mpd = {
-			.bio = NULL,
-			.last_block_in_bio = 0,
-			.get_block = get_block,
-			.use_writepage = 1,
-		};
-
-		ret = write_cache_pages(mapping, wbc, __mpage_writepage, &mpd);
-		if (mpd.bio) {
-			int op_flags = (wbc->sync_mode == WB_SYNC_ALL ?
-				  REQ_SYNC : 0);
-			mpage_bio_submit(REQ_OP_WRITE, op_flags, mpd.bio);
-		}
-	}
+	ret = write_cache_pages(mapping, wbc, __mpage_writepage, &mpd);
+	if (mpd.bio)
+		mpage_bio_submit(mpd.bio);
 	blk_finish_plug(&plug);
 	return ret;
 }
 EXPORT_SYMBOL(mpage_writepages);
-
-int mpage_writepage(struct page *page, get_block_t get_block,
-	struct writeback_control *wbc)
-{
-	struct mpage_data mpd = {
-		.bio = NULL,
-		.last_block_in_bio = 0,
-		.get_block = get_block,
-		.use_writepage = 0,
-	};
-	int ret = __mpage_writepage(page, wbc, &mpd);
-	if (mpd.bio) {
-		int op_flags = (wbc->sync_mode == WB_SYNC_ALL ?
-			  REQ_SYNC : 0);
-		mpage_bio_submit(REQ_OP_WRITE, op_flags, mpd.bio);
-	}
-	return ret;
-}
-EXPORT_SYMBOL(mpage_writepage);

@@ -381,6 +381,7 @@ static enum tpg_pixel_aspect vivid_get_pixel_aspect(const struct vivid_dev *dev)
 void vivid_update_format_cap(struct vivid_dev *dev, bool keep_controls)
 {
 	struct v4l2_bt_timings *bt = &dev->dv_timings_cap[dev->input].bt;
+	u32 dims[V4L2_CTRL_MAX_DIMS] = {};
 	unsigned size;
 	u64 pixelclock;
 
@@ -465,6 +466,17 @@ void vivid_update_format_cap(struct vivid_dev *dev, bool keep_controls)
 	tpg_s_video_aspect(&dev->tpg, vivid_get_video_aspect(dev));
 	tpg_s_pixel_aspect(&dev->tpg, vivid_get_pixel_aspect(dev));
 	tpg_update_mv_step(&dev->tpg);
+
+	/*
+	 * We can be called from within s_ctrl, in that case we can't
+	 * modify controls. Luckily we don't need to in that case.
+	 */
+	if (keep_controls)
+		return;
+
+	dims[0] = roundup(dev->src_rect.width, PIXEL_ARRAY_DIV);
+	dims[1] = roundup(dev->src_rect.height, PIXEL_ARRAY_DIV);
+	v4l2_ctrl_modify_dimensions(dev->pixel_array, dims);
 }
 
 /* Map the field to something that is valid for the current input */
@@ -1116,11 +1128,9 @@ int vidioc_g_fmt_vid_overlay(struct file *file, void *priv,
 		    ((compose->width + 7) / 8) * compose->height))
 			return -EFAULT;
 	}
-	if (clipcount && win->clips) {
-		if (copy_to_user(win->clips, dev->clips_cap,
-				 clipcount * sizeof(dev->clips_cap[0])))
-			return -EFAULT;
-	}
+	if (clipcount && win->clips)
+		memcpy(win->clips, dev->clips_cap,
+		       clipcount * sizeof(dev->clips_cap[0]));
 	return 0;
 }
 
@@ -1150,9 +1160,8 @@ int vidioc_try_fmt_vid_overlay(struct file *file, void *priv,
 	if (win->clipcount > MAX_CLIPS)
 		win->clipcount = MAX_CLIPS;
 	if (win->clipcount) {
-		if (copy_from_user(dev->try_clips_cap, win->clips,
-				   win->clipcount * sizeof(dev->clips_cap[0])))
-			return -EFAULT;
+		memcpy(dev->try_clips_cap, win->clips,
+		       win->clipcount * sizeof(dev->clips_cap[0]));
 		for (i = 0; i < win->clipcount; i++) {
 			struct v4l2_rect *r = &dev->try_clips_cap[i].c;
 
@@ -1175,9 +1184,8 @@ int vidioc_try_fmt_vid_overlay(struct file *file, void *priv,
 					return -EINVAL;
 			}
 		}
-		if (copy_to_user(win->clips, dev->try_clips_cap,
-				 win->clipcount * sizeof(dev->clips_cap[0])))
-			return -EFAULT;
+		memcpy(win->clips, dev->try_clips_cap,
+		       win->clipcount * sizeof(dev->clips_cap[0]));
 	}
 	return 0;
 }

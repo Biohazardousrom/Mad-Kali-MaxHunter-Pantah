@@ -51,14 +51,12 @@ static int ffa_device_probe(struct device *dev)
 	return ffa_drv->probe(ffa_dev);
 }
 
-static int ffa_device_remove(struct device *dev)
+static void ffa_device_remove(struct device *dev)
 {
 	struct ffa_driver *ffa_drv = to_ffa_driver(dev->driver);
 
 	if (ffa_drv->remove)
 		ffa_drv->remove(to_ffa_dev(dev));
-
-	return 0;
 }
 
 static int ffa_device_uevent(struct device *dev, struct kobj_uevent_env *env)
@@ -173,7 +171,8 @@ bool ffa_device_is_valid(struct ffa_device *ffa_dev)
 	return valid;
 }
 
-struct ffa_device *ffa_device_register(const uuid_t *uuid, int vm_id)
+struct ffa_device *ffa_device_register(const uuid_t *uuid, int vm_id,
+				       const struct ffa_ops *ops)
 {
 	int id, ret;
 	struct device *dev;
@@ -196,6 +195,7 @@ struct ffa_device *ffa_device_register(const uuid_t *uuid, int vm_id)
 
 	ffa_dev->id = id;
 	ffa_dev->vm_id = vm_id;
+	ffa_dev->ops = ops;
 	uuid_copy(&ffa_dev->uuid, uuid);
 
 	ret = device_register(&ffa_dev->dev);
