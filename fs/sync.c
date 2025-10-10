@@ -9,7 +9,6 @@
 #include <linux/fs.h>
 #include <linux/slab.h>
 #include <linux/export.h>
-#include <linux/module.h>
 #include <linux/namei.h>
 #include <linux/sched/xacct.h>
 #include <linux/writeback.h>
@@ -19,9 +18,6 @@
 #include <linux/quotaops.h>
 #include <linux/backing-dev.h>
 #include "internal.h"
-
-bool fsync_enabled = true;
-module_param(fsync_enabled, bool, 0644);
 
 #define VALID_FLAGS (SYNC_FILE_RANGE_WAIT_BEFORE|SYNC_FILE_RANGE_WRITE| \
 			SYNC_FILE_RANGE_WAIT_AFTER)
@@ -152,14 +148,9 @@ void emergency_sync(void)
  */
 SYSCALL_DEFINE1(syncfs, int, fd)
 {
-	struct fd f;
+	struct fd f = fdget(fd);
 	struct super_block *sb;
 	int ret, ret2;
-
-	if (!fsync_enabled)
-		return 0;
-
-	f = fdget(fd);
 
 	if (!f.file)
 		return -EBADF;
@@ -190,9 +181,6 @@ int vfs_fsync_range(struct file *file, loff_t start, loff_t end, int datasync)
 {
 	struct inode *inode = file->f_mapping->host;
 
-	if (!fsync_enabled)
-		return 0;
-
 	if (!file->f_op->fsync)
 		return -EINVAL;
 	if (!datasync && (inode->i_state & I_DIRTY_TIME))
@@ -211,20 +199,14 @@ EXPORT_SYMBOL(vfs_fsync_range);
  */
 int vfs_fsync(struct file *file, int datasync)
 {
-
 	return vfs_fsync_range(file, 0, LLONG_MAX, datasync);
 }
 EXPORT_SYMBOL(vfs_fsync);
 
 static int do_fsync(unsigned int fd, int datasync)
 {
-	struct fd f;
+	struct fd f = fdget(fd);
 	int ret = -EBADF;
-
-	if (!fsync_enabled)
-		return 0;
-
-	f = fdget(fd);
 
 	if (f.file) {
 		ret = vfs_fsync(f.file, datasync);
@@ -251,9 +233,6 @@ int sync_file_range(struct file *file, loff_t offset, loff_t nbytes,
 	struct address_space *mapping;
 	loff_t endbyte;			/* inclusive */
 	umode_t i_mode;
-
-	if (!fsync_enabled)
-		return 0;
 
 	ret = -EINVAL;
 	if (flags & ~VALID_FLAGS)
